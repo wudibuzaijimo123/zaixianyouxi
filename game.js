@@ -170,7 +170,7 @@ const api = {
 };
 
 // 手动房号：两个人输一样的号就进同一个房间，先到的人自动建房
-async function enterRaceRoom(rawCode) {
+async function enterRaceRoom(rawCode, mode = "join") {
   const code = String(rawCode || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
   if (code.length < 3) {
     document.querySelector("#roomStatus").textContent = "先输入房间号（至少 3 位），两人输一样的号就能进同一个房间";
@@ -184,10 +184,11 @@ async function enterRaceRoom(rawCode) {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       result = await api.post("/api/race/rooms", {
-        action: "join",
+        action: mode === "create" ? "create" : "join",
         roomCode: code,
         name: playerNameInput.value.trim() || "车手",
-        finishDistance: Number(document.querySelector("#raceLength")?.value || 1500)
+        // 距离只有房主（创建者）决定，加入方传了也会被服务端忽略
+        finishDistance: mode === "create" ? Number(document.querySelector("#raceLength")?.value || 1500) : undefined
       });
       break;
     } catch (error) {
@@ -206,6 +207,11 @@ async function enterRaceRoom(rawCode) {
   const input = document.querySelector("#roomCodeInput");
   if (input) input.value = roomCode;
   setRoomBadge(roomCode);
+  const lengthSelect = document.querySelector("#raceLength");
+  if (lengthSelect) {
+    lengthSelect.disabled = mode !== "create";
+    lengthSelect.title = mode === "create" ? "房主可修改比赛距离" : "比赛距离由房主决定";
+  }
   if (roomPollTimer) clearInterval(roomPollTimer);
   roomPollTimer = setInterval(syncRaceRoom, 60);
   startRaceStream();
@@ -336,6 +342,7 @@ async function syncRaceRoom() {
       time: raceTime
     });
     applyRaceStart(posted);
+    if (posted.raceOver) forceEndRace();
     // 兜底：两人都在房间里但服务端暂时没给出统一时刻（例如刚被重置），本地 3 秒后发车
     if (!raceSync.armed && Number(posted.playerCount) >= 2) {
       raceSync.startAt = Date.now() + 3000;
@@ -480,7 +487,7 @@ function syncRemoteCarVisual() {
   remoteCar.group.position.z += (targetZ - remoteCar.group.position.z) * 0.6;
   remoteCar.group.position.x += (targetX - remoteCar.group.position.x) * 0.6;
   const otherSlope = (trackCurve(projected + 4) - trackCurve(projected - 4)) / 8;
-  remoteCar.group.rotation.y = -o.heading + Math.atan(otherSlope);
+  remoteCar.group.rotation.y = -o.heading - Math.atan(otherSlope);
   // 拉开太远就干脆不画（交给屏幕提示条和小地图显示）
   remoteCar.group.visible = Math.abs(rel) < 420;
   updateRivalMarker(rel);
@@ -506,6 +513,7 @@ function startRaceStream() {
       try { data = JSON.parse(event.data); } catch (error) { return; }
       if (!data) return;
       applyRaceStart(data);
+      if (data.raceOver) forceEndRace();
       const other = (data.players || [])[0];
       if (other) updateRemoteCar(other);
     };
@@ -1762,6 +1770,27 @@ function finishRace() {
   overlay.classList.remove("hidden");
 }
 
+// 对手冲线 5 秒后你还没到终点 -> 强制结束（判负但保留成绩）
+function forceEndRace() {
+  if (!running) return;
+  running = false;
+  sound.stopBGM();
+  const other = raceSync.other;
+  title.textContent = "比赛结束";
+  const lines = [
+    "对手已经冲线，你没能在他冲线后 5 秒内到达终点。",
+    `你的进度：${Math.round(raceDistance)} / ${finishDistance} m　用时：${formatRaceTime(raceTime)}`,
+    `当前速度：${Math.round(currentSpeed * 90)} km/h　最高速度：${Math.round(maxSpeed)} km/h`
+  ];
+  if (other && other.finishTime) {
+    lines.splice(1, 0, `对手用时 ${formatRaceTime(other.finishTime)}　冲线 ${other.finishSpeed || 0} km/h`);
+  }
+  message.innerHTML = lines.join("<br>");
+  document.querySelector("#start").textContent = "再来一局";
+  overlay.classList.remove("hidden");
+  setRoomBadge(roomCode, false, "比赛结束");
+}
+
 async function endGame() {
   running = false;
   sound.stopBGM();
@@ -2022,7 +2051,7 @@ function update() {
   // 车身朝向 = 转向角 + 赛道切线方向，弯道上车头始终顺着路
   const roadSlope = (trackCurve(raceDistance + 4) - trackCurve(raceDistance - 4)) / 8;
   const roadYaw = Math.atan(roadSlope);
-  player.group.rotation.y = -carPhysics.heading + roadYaw;
+  player.group.rotation.y = -carPhysics.heading - roadYaw;
   player.group.rotation.z = -carPhysics.roll;
 
   // 前轮机械打舵转向：向右打舵为负，向左打舵为正 (左右打舵清晰可见且方向与车头行进绝对一致！)
@@ -2470,7 +2499,7 @@ bindPedal("#throttle", "throttle");
 bindPedal("#brake", "brake");
 
 document.querySelector("#createRoom")?.addEventListener("click", async () => {
-  try { await enterRaceRoom(document.querySelector("#roomCodeInput")?.value); }
+  try { await enterRaceRoom(document.querySelector("#roomCodeInput")?.value, "create"); }
   catch (error) { document.querySelector("#roomStatus").textContent = error.message; }
 });
 document.querySelector("#joinRoom")?.addEventListener("click", async () => {

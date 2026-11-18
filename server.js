@@ -97,14 +97,12 @@ const server = http.createServer(async (request, response) => {
         }
       }
 
-      let room = raceRooms.get(roomCode);
-      if (!room && action === "join") {
-        // 输入的房间号还不存在 → 直接把输入的人当成房主建出来
-        const finishDistance = Math.max(300, Math.min(20000, Number(body.finishDistance) || 1500));
-        room = { players: new Map(), updatedAt: Date.now(), startAt: 0, finishDistance };
-        raceRooms.set(roomCode, room);
+      const room = raceRooms.get(roomCode);
+      if (!room) {
+        return sendJson(response, 404, {
+          error: action === "join" ? "房间不存在，请让房主先创建这个房间号。" : "房间不存在，请检查房间码。"
+        });
       }
-      if (!room) return sendJson(response, 404, { error: "房间不存在，请检查房间码。" });
       for (const [id, player] of room.players) {
         if (Date.now() - player.updatedAt > TIMEOUT_MS) room.players.delete(id);
       }
@@ -148,6 +146,7 @@ const server = http.createServer(async (request, response) => {
       for (const key of ["x", "heading", "speed", "distance"]) player[key] = Number.isFinite(Number(body[key])) ? Number(body[key]) : player[key];
       if (typeof body.finished === "boolean") {
         player.finished = body.finished;
+        if (body.finished && !room.finishAt) room.finishAt = Date.now();
         if (body.finished && !player.finishTime) {
           const t = Number(body.time);
           if (Number.isFinite(t) && t > 0) player.finishTime = Math.round(t * 10) / 10;
@@ -176,6 +175,7 @@ const server = http.createServer(async (request, response) => {
         serverNow: Date.now(),
         finishDistance: room.finishDistance,
         playerCount: activePlayers(room).length,
+        raceOver: Boolean(room.finishAt && Date.now() - room.finishAt > 5000),
         // 顺手把对手状态带回去，省掉客户端每帧一次的 GET
         players: [...room.players.values()].filter(p => p.id !== body.playerId && Date.now() - p.updatedAt < 15000)
       });
@@ -228,7 +228,8 @@ const server = http.createServer(async (request, response) => {
           startAt: room.startAt || 0,
           serverNow: Date.now(),
           finishDistance: room.finishDistance,
-          playerCount: room.players.size
+          playerCount: room.players.size,
+          raceOver: Boolean(room.finishAt && Date.now() - room.finishAt > 5000)
         };
         try {
           response.write(`data: ${JSON.stringify(data)}\n\n`);
