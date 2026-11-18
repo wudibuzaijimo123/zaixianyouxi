@@ -280,7 +280,8 @@ function applyRaceStart(payload) {
   const serverNow = Number(payload.serverNow) || Date.now();
   const clockOffset = serverNow - Date.now();          // 服务器时钟领先本地的毫秒数
   const localStart = Number(payload.startAt) - clockOffset;
-  // 服务端重新定了发车时刻（有人重进房间）→ 跟着重排，不再被 armed 挡死
+  // 已经发车了就忽略服务端后续的时刻变化，避免比赛被打断
+  if (raceSync.armed && Date.now() > raceSync.startAt) return;
   if (raceSync.armed && Math.abs(localStart - raceSync.startAt) < 400) return;
   raceSync.startAt = localStart;
   raceSync.armed = true;
@@ -1415,16 +1416,28 @@ const traffic = [];
 const trafficColors = [0x111111, 0x0055ff, 0xcc2222, 0x888888, 0x1e3a5f];
 
 function spawnTraffic() {
-  const laneIndex = Math.floor(Math.random() * LANE_COUNT);
-  const laneX = -ROAD_WIDTH / 2 + laneIndex * LANE_WIDTH + LANE_WIDTH / 2;
-  const color = trafficColors[Math.floor(Math.random() * trafficColors.length)];
-  const enemy = createTeslaCar(false, color);
+  if (traffic.length > 46) return;   // 上限，别把手机拖垮
 
-  enemy.group.position.set(laneX, 0, -200);
-  enemy.laneX = laneX;
-  enemy.speed = 0.22 + Math.random() * 0.18;
-  scene.add(enemy.group);
-  traffic.push(enemy);
+  // 有一定概率一次刷出并排的 2~3 辆，只留一条缝，逼玩家变道
+  const blockCount = Math.random() < 0.42 ? 2 : (Math.random() < 0.18 ? 3 : 1);
+  const freeLanes = Math.max(1, LANE_COUNT - blockCount);
+  const startLane = Math.floor(Math.random() * freeLanes);
+
+  for (let i = 0; i < blockCount; i++) {
+    const laneIndex = Math.min(LANE_COUNT - 1, startLane + i);
+    const laneX = -ROAD_WIDTH / 2 + laneIndex * LANE_WIDTH + LANE_WIDTH / 2;
+    const color = trafficColors[Math.floor(Math.random() * trafficColors.length)];
+    const enemy = createTeslaCar(false, color);
+
+    enemy.group.position.set(laneX, 0, -380 - Math.random() * 60);
+    enemy.laneX = laneX;
+    // 快慢车混跑：慢车 60~80 km/h，快车 120~160 km/h
+    enemy.speed = Math.random() < 0.55
+      ? 0.14 + Math.random() * 0.10
+      : 0.40 + Math.random() * 0.20;
+    scene.add(enemy.group);
+    traffic.push(enemy);
+  }
 }
 
 const coins = [];
@@ -1688,7 +1701,7 @@ function resetGame() {
   nitroBar.style.width = "100%";
 
   // 开局立即在前方车道生成 6 辆巡航车流，绝不让道路空旷！
-  const initialZ = [-100, -155, -210, -270, -330, -390];
+  const initialZ = [-70, -105, -140, -180, -220, -260, -300, -340, -380, -420, -460, -500, -540, -580];
   initialZ.forEach((z, idx) => {
     const laneIndex = idx % LANE_COUNT;
     const laneX = -ROAD_WIDTH / 2 + laneIndex * LANE_WIDTH + LANE_WIDTH / 2;
@@ -2099,7 +2112,7 @@ function update() {
   });
 
   // 5. 敌车刷新与真实碰撞检测 (高频刷新车流，丰富自驾驾驶感)
-  if (frame % Math.max(80, Math.floor(125 - currentSpeed * 10)) === 0) {
+  if (frame % Math.max(38, Math.floor(72 - currentSpeed * 14)) === 0) {
     spawnTraffic();
   }
   if (Math.random() < 0.03) {

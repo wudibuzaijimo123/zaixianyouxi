@@ -157,9 +157,13 @@ const server = http.createServer(async (request, response) => {
       for (const [id, other] of room.players) {
         if (id !== body.playerId && Date.now() - other.updatedAt > 15000) room.players.delete(id);
       }
-      if (room.players.size < 2) room.startAt = 0;
-      if (activePlayers(room).length >= 2 && !room.startAt) room.startAt = Date.now() + 4000;
-      if (activePlayers(room).length < 2) room.startAt = 0;
+      // 只有"两人都在场"才安排发车；发车之后即使有人短暂掉线也不重排
+      const activeCount = activePlayers(room).length;
+      if (activeCount >= 2) {
+        if (!room.startAt) room.startAt = Date.now() + 4000;
+      } else if (room.startAt && Date.now() < room.startAt) {
+        room.startAt = 0;   // 还没发车就走了一个：取消这次发车
+      }
       player.updatedAt = room.updatedAt = Date.now();
       // 临时诊断：每 5 秒打印一次房间内每位车手的里程，用于定位"原地不动"
       if (!room._logAt || Date.now() - room._logAt > 5000) {
@@ -228,7 +232,7 @@ const server = http.createServer(async (request, response) => {
           startAt: room.startAt || 0,
           serverNow: Date.now(),
           finishDistance: room.finishDistance,
-          playerCount: room.players.size,
+          playerCount: activePlayers(room).length,
           raceOver: Boolean(room.finishAt && Date.now() - room.finishAt > 5000)
         };
         try {
