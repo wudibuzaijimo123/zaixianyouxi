@@ -141,6 +141,8 @@ const server = http.createServer(async (request, response) => {
         if (body.finished && !player.finishTime) {
           const t = Number(body.time);
           if (Number.isFinite(t) && t > 0) player.finishTime = Math.round(t * 10) / 10;
+          const sp = Number(body.speed);
+          if (Number.isFinite(sp) && sp > 0) player.finishSpeed = Math.round(sp * 90);
         }
       }
       for (const [id, other] of room.players) {

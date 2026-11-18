@@ -32,7 +32,9 @@ const soundStatus = document.querySelector("#soundStatus");
 // ── 基础运行状态 ──
 let running = false;
 let score = 0;
-let raceTime = 0;            // 比赛用时（秒），按固定步长累计，保证两人可比
+let raceTime = 0;
+let maxSpeed = 0;      // 本局最高时速
+let finishSpeed = 0;   // 冲线瞬间时速            // 比赛用时（秒），按固定步长累计，保证两人可比
 let nitro = 100;
 let baseSpeed = 1.0;
 let currentSpeed = 1.0;
@@ -396,6 +398,7 @@ function updateRemoteCar(other) {
     speed: Number(other.speed) || 0,
     distance: Number(other.distance) || 0,
     finishTime: Number(other.finishTime) || 0,
+    finishSpeed: Number(other.finishSpeed) || 0,
     at: Date.now()
   };
   raceSync.remoteName = other.name;
@@ -1671,6 +1674,8 @@ function resetGame() {
   player.wheels[1].steer.rotation.set(0, 0, 0);
 
   raceTime = 0;
+  maxSpeed = 0;
+  finishSpeed = 0;
   scoreEl.textContent = formatRaceTime(0);
   nitroBar.style.width = "100%";
 
@@ -1729,11 +1734,18 @@ function finishRace() {
       ? `🏆 你赢了！比对手快 ${(other.finishTime - raceTime).toFixed(1)} 秒`
       : `对手更快，你慢了 ${(raceTime - other.finishTime).toFixed(1)} 秒`;
   }
-  message.innerHTML =
-    `完成 ${Math.floor(finishDistance / 100) / 10} km 赛道！<br>` +
-    `用时：<b style="color:#61efff;font-size:24px">${formatRaceTime(raceTime)}</b><br>` +
-    (verdict ? `${verdict}<br>` : "") +
-    `最佳：${formatRaceTime(bestTime)}`;
+  finishSpeed = Math.round(currentSpeed * 90);
+  const lines = [
+    `完成 ${Math.floor(finishDistance / 100) / 10} km 赛道！`,
+    `用时：<b style="color:#61efff;font-size:24px">${formatRaceTime(raceTime)}</b>`,
+    `冲线速度：<b>${finishSpeed} km/h</b>　最高速度：<b>${Math.round(maxSpeed)} km/h</b>`
+  ];
+  if (verdict) lines.splice(1, 0, verdict);
+  if (other && other.finishTime) {
+    lines.push(`对手用时 ${formatRaceTime(other.finishTime)}　冲线 ${other.finishSpeed || 0} km/h`);
+  }
+  lines.push(`最佳用时：${formatRaceTime(bestTime)}`);
+  message.innerHTML = lines.join("<br>");
 
   // 把用时同步上去（成绩榜 + 房间状态）
   api.post("/api/scores", { name: playerName, time: raceTime })
@@ -1742,7 +1754,7 @@ function finishRace() {
   if (roomCode && roomPlayerId) {
     api.post("/api/race/state", {
       roomCode, playerId: roomPlayerId, x: carPhysics.x,
-      heading: carPhysics.heading, speed: 0, distance: raceDistance,
+      heading: carPhysics.heading, speed: currentSpeed, distance: raceDistance,
       finished: true, time: raceTime
     }).catch(() => {});
   }
@@ -1935,6 +1947,7 @@ function update() {
 
   score += currentSpeed * 0.45;
   raceTime += 1 / 60;
+  maxSpeed = Math.max(maxSpeed, currentSpeed * 90);
   nitroBar.style.width = `${nitro}%`;
   scoreEl.textContent = formatRaceTime(raceTime);
   speedEl.textContent = Math.floor(currentSpeed * 90);
