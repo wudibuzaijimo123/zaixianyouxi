@@ -8,6 +8,14 @@ const scoreFile = path.join(dataDir, "scores.json");
 const port = Number(process.env.PORT || 3000);
 const raceRooms = new Map();
 
+const ACTIVE_MS = 3500;    // 多久没上报就视为不在场
+const TIMEOUT_MS = 15000;  // 多久后彻底移出房间
+
+function activePlayers(room) {
+  const now = Date.now();
+  return [...room.players.values()].filter(p => now - p.updatedAt < ACTIVE_MS);
+}
+
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -98,9 +106,11 @@ const server = http.createServer(async (request, response) => {
       }
       if (!room) return sendJson(response, 404, { error: "房间不存在，请检查房间码。" });
       for (const [id, player] of room.players) {
-        if (Date.now() - player.updatedAt > 15000) room.players.delete(id);
+        if (Date.now() - player.updatedAt > TIMEOUT_MS) room.players.delete(id);
       }
-      if (room.players.size >= 2) return sendJson(response, 409, { error: "房间已满，先让对方退出房间或等 4 秒掉线后再进。" });
+      if (activePlayers(room).length >= 2) {
+        return sendJson(response, 409, { error: "房间已满，先让对方退出房间或等 4 秒掉线后再进。" });
+      }
       const playerId = Math.random().toString(36).slice(2, 12);
       // 起跑车道和车身颜色都由服务器分配，两边看到的是同一套
       const lane = room.players.size === 0 ? -1 : 1;
@@ -112,11 +122,11 @@ const server = http.createServer(async (request, response) => {
       room.updatedAt = Date.now();
 
       // 两人到齐 → 安排统一起跑时刻（4 秒倒计时），双方同时归零起步
-      if (room.players.size >= 2 && !room.startAt) {
+      const activeCount = activePlayers(room).length;
+      if (activeCount < 2) {
+        room.startAt = 0;   // 只有一个人在房间里：绝不开赛
+      } else if (!room.startAt) {
         room.startAt = Date.now() + 4000;
-      }
-      if (room.players.size < 2) {
-        room.startAt = 0;
       }
 
       return sendJson(response, 200, {
@@ -124,7 +134,7 @@ const server = http.createServer(async (request, response) => {
         startAt: room.startAt || 0,
         serverNow: Date.now(),
         finishDistance: room.finishDistance,
-        playerCount: room.players.size,
+        playerCount: activePlayers(room).length,
         lane,
         color
       });
@@ -149,7 +159,8 @@ const server = http.createServer(async (request, response) => {
         if (id !== body.playerId && Date.now() - other.updatedAt > 15000) room.players.delete(id);
       }
       if (room.players.size < 2) room.startAt = 0;
-      if (room.players.size >= 2 && !room.startAt) room.startAt = Date.now() + 4000;
+      if (activePlayers(room).length >= 2 && !room.startAt) room.startAt = Date.now() + 4000;
+      if (activePlayers(room).length < 2) room.startAt = 0;
       player.updatedAt = room.updatedAt = Date.now();
       // 临时诊断：每 5 秒打印一次房间内每位车手的里程，用于定位"原地不动"
       if (!room._logAt || Date.now() - room._logAt > 5000) {
@@ -164,7 +175,7 @@ const server = http.createServer(async (request, response) => {
         startAt: room.startAt || 0,
         serverNow: Date.now(),
         finishDistance: room.finishDistance,
-        playerCount: room.players.size,
+        playerCount: activePlayers(room).length,
         // 顺手把对手状态带回去，省掉客户端每帧一次的 GET
         players: [...room.players.values()].filter(p => p.id !== body.playerId && Date.now() - p.updatedAt < 15000)
       });
