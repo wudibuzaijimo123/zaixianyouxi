@@ -102,28 +102,104 @@ async function connectRaceRoom(action, code = "") {
   const result = await api.post("/api/race/rooms", {
     action,
     roomCode: code,
-    name: playerNameInput.value.trim() || "车手"
+    name: playerNameInput.value.trim() || "车手",
+    finishDistance: Number(document.querySelector("#raceLength")?.value || 1500)
   });
   roomCode = result.roomCode;
   roomPlayerId = result.playerId;
   document.querySelector("#roomStatus").textContent = `房间码 ${roomCode} · 等待朋友加入`;
   if (roomPollTimer) clearInterval(roomPollTimer);
   roomPollTimer = setInterval(syncRaceRoom, 160);
+  applyRaceStart(result);
+}
+
+// ── 联机同步开局：两人同时回到同一起跑线 ──
+const raceSync = { startAt: 0, armed: false, locked: false, remoteId: "" };
+
+function ensureCountdownEl() {
+  let el = document.querySelector("#raceCountdown");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "raceCountdown";
+    el.style.cssText =
+      "position:fixed;left:0;right:0;top:0;bottom:0;display:none;align-items:center;" +
+      "justify-content:center;font:900 min(20vw,150px)/1 'Orbitron','Rajdhani',sans-serif;" +
+      "color:#61efff;text-shadow:0 0 30px rgba(97,239,255,.85);pointer-events:none;z-index:90;";
+    document.body.appendChild(el);
+  }
+  return el;
+}
+
+function applyRaceStart(payload) {
+  if (!payload || !payload.startAt || raceSync.armed) return;
+  const serverNow = Number(payload.serverNow) || Date.now();
+  const clockOffset = serverNow - Date.now();          // 服务器时钟领先本地的毫秒数
+  raceSync.startAt = Number(payload.startAt) - clockOffset;
+  raceSync.armed = true;
+  if (Number(payload.finishDistance) > 0) {
+    finishDistance = Number(payload.finishDistance);
+    const sel = document.querySelector("#raceLength");
+    if (sel) sel.value = String(finishDistance);
+  }
+  startMultiRaceCountdown();
+}
+
+function startMultiRaceCountdown() {
+  raceSync.locked = true;
+  const el = ensureCountdownEl();
+  const tick = () => {
+    const left = Math.ceil((raceSync.startAt - Date.now()) / 1000);
+    if (left > 0) {
+      el.style.display = "flex";
+      el.textContent = String(left);
+      setTimeout(tick, 120);
+      return;
+    }
+    el.style.display = "flex";
+    el.textContent = "GO";
+    launchMultiRace();
+    setTimeout(() => { el.style.display = "none"; }, 700);
+  };
+  tick();
+}
+
+function launchMultiRace() {
+  raceSync.locked = false;
+  sound.ensureContext();
+  resetGame();                       // 两人同一时刻归零 → 同一起跑线
+  // 按房间内 id 顺序错开车道，避免两台车叠在同一个点
+  const side = raceSync.remoteId && roomPlayerId < raceSync.remoteId ? -1 : 1;
+  carPhysics.x = side * LANE_WIDTH * 0.5;
+  player.group.position.x = carPhysics.x;
+  running = true;
+  overlay.classList.add("hidden");
+  document.querySelector("#roomStatus").textContent = "发车！";
+  sound.startBGM();
+  triggerHaptic([40, 60, 120]);
 }
 
 async function syncRaceRoom() {
   if (!roomCode || !roomPlayerId) return;
   try {
-    await api.post("/api/race/state", {
+    const posted = await api.post("/api/race/state", {
       roomCode, playerId: roomPlayerId, x: carPhysics.x,
-      heading: carPhysics.heading, speed: currentSpeed, distance: raceDistance
+      heading: carPhysics.heading, speed: currentSpeed, distance: raceDistance,
+      finished: !running && raceDistance >= finishDistance
     });
+    applyRaceStart(posted);
     const result = await api.get(`/api/race/state?roomCode=${roomCode}&playerId=${roomPlayerId}`);
     const other = result.players[0];
     if (!other) {
       document.querySelector("#roomStatus").textContent = `房间码 ${roomCode} · 等待朋友加入`;
+      if (raceSync.locked) {                 // 对手跑了就别把玩家冻在倒计时里
+        raceSync.locked = false;
+        raceSync.armed = false;
+        const el = document.querySelector("#raceCountdown");
+        if (el) el.style.display = "none";
+      }
       return;
     }
+    raceSync.remoteId = other.id;
     document.querySelector("#roomStatus").textContent = `房间 ${roomCode} · 对手：${other.name}`;
     if (!remoteCar) {
       remoteCar = createTeslaCar(false, 0x36e5ff);
@@ -1219,6 +1295,8 @@ function resetGame() {
 }
 
 function startGame() {
+  // 联机倒计时未结束前，手动开始无效，等统一发车
+  if (roomCode && raceSync.armed && Date.now() < raceSync.startAt) return;
   sound.ensureContext();
   running = true;
   overlay.classList.add("hidden");
@@ -1279,6 +1357,7 @@ async function endGame() {
 // ═══════════════════════════════════════
 function update() {
   if (!running) return;
+  if (raceSync.locked) return;   // 联机倒计时中冻结车辆
   frame++;
 
   // 1. 速度与加速

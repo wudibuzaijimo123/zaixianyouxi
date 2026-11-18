@@ -64,7 +64,8 @@ const server = http.createServer(async (request, response) => {
       let roomCode = String(body.roomCode || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
       if (body.action === "create") {
         roomCode = Math.random().toString(36).slice(2, 8).toUpperCase();
-        raceRooms.set(roomCode, { players: new Map(), updatedAt: Date.now() });
+        const finishDistance = Math.max(300, Math.min(20000, Number(body.finishDistance) || 1500));
+        raceRooms.set(roomCode, { players: new Map(), updatedAt: Date.now(), startAt: 0, finishDistance });
       }
       const room = raceRooms.get(roomCode);
       if (!room) return sendJson(response, 404, { error: "房间不存在，请检查房间码。" });
@@ -73,9 +74,26 @@ const server = http.createServer(async (request, response) => {
       }
       if (room.players.size >= 2) return sendJson(response, 409, { error: "房间已满（最多两名车手）。" });
       const playerId = Math.random().toString(36).slice(2, 12);
-      room.players.set(playerId, { id: playerId, name, x: 0, heading: 0, speed: 0, distance: 0, updatedAt: Date.now() });
+      room.players.set(playerId, {
+        id: playerId, name, x: 0, heading: 0, speed: 0, distance: 0,
+        finished: false, updatedAt: Date.now()
+      });
       room.updatedAt = Date.now();
-      return sendJson(response, 200, { roomCode, playerId });
+
+      // 两人到齐 → 安排统一起跑时刻（4 秒倒计时），双方同时归零起步
+      if (room.players.size >= 2 && !room.startAt) {
+        room.startAt = Date.now() + 4000;
+      }
+      if (room.players.size < 2) {
+        room.startAt = 0;
+      }
+
+      return sendJson(response, 200, {
+        roomCode, playerId,
+        startAt: room.startAt || 0,
+        serverNow: Date.now(),
+        finishDistance: room.finishDistance
+      });
     }
 
     if (url.pathname === "/api/race/state" && request.method === "POST") {
@@ -84,15 +102,31 @@ const server = http.createServer(async (request, response) => {
       if (!room || !room.players.has(body.playerId)) return sendJson(response, 404, { error: "联机房间已失效。" });
       const player = room.players.get(body.playerId);
       for (const key of ["x", "heading", "speed", "distance"]) player[key] = Number.isFinite(Number(body[key])) ? Number(body[key]) : player[key];
+      if (typeof body.finished === "boolean") player.finished = body.finished;
+      for (const [id, other] of room.players) {
+        if (id !== body.playerId && Date.now() - other.updatedAt > 5000) room.players.delete(id);
+      }
+      if (room.players.size < 2) room.startAt = 0;
+      if (room.players.size >= 2 && !room.startAt) room.startAt = Date.now() + 4000;
       player.updatedAt = room.updatedAt = Date.now();
-      return sendJson(response, 200, { ok: true });
+      return sendJson(response, 200, {
+        ok: true,
+        startAt: room.startAt || 0,
+        serverNow: Date.now(),
+        finishDistance: room.finishDistance
+      });
     }
 
     if (url.pathname === "/api/race/state" && request.method === "GET") {
       const room = raceRooms.get(String(url.searchParams.get("roomCode") || "").toUpperCase());
       if (!room) return sendJson(response, 404, { error: "联机房间已失效。" });
       const playerId = url.searchParams.get("playerId");
-      return sendJson(response, 200, { players: [...room.players.values()].filter(player => player.id !== playerId && Date.now() - player.updatedAt < 5000) });
+      return sendJson(response, 200, {
+        players: [...room.players.values()].filter(player => player.id !== playerId && Date.now() - player.updatedAt < 5000),
+        startAt: room.startAt || 0,
+        serverNow: Date.now(),
+        finishDistance: room.finishDistance
+      });
     }
 
     if (request.method !== "GET") {
