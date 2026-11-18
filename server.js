@@ -98,7 +98,7 @@ const server = http.createServer(async (request, response) => {
       }
       if (!room) return sendJson(response, 404, { error: "房间不存在，请检查房间码。" });
       for (const [id, player] of room.players) {
-        if (Date.now() - player.updatedAt > 3500) room.players.delete(id);
+        if (Date.now() - player.updatedAt > 15000) room.players.delete(id);
       }
       if (room.players.size >= 2) return sendJson(response, 409, { error: "房间已满，先让对方退出房间或等 4 秒掉线后再进。" });
       const playerId = Math.random().toString(36).slice(2, 12);
@@ -144,7 +144,7 @@ const server = http.createServer(async (request, response) => {
         }
       }
       for (const [id, other] of room.players) {
-        if (id !== body.playerId && Date.now() - other.updatedAt > 5000) room.players.delete(id);
+        if (id !== body.playerId && Date.now() - other.updatedAt > 15000) room.players.delete(id);
       }
       if (room.players.size < 2) room.startAt = 0;
       if (room.players.size >= 2 && !room.startAt) room.startAt = Date.now() + 4000;
@@ -164,7 +164,7 @@ const server = http.createServer(async (request, response) => {
         finishDistance: room.finishDistance,
         playerCount: room.players.size,
         // 顺手把对手状态带回去，省掉客户端每帧一次的 GET
-        players: [...room.players.values()].filter(p => p.id !== body.playerId && Date.now() - p.updatedAt < 5000)
+        players: [...room.players.values()].filter(p => p.id !== body.playerId && Date.now() - p.updatedAt < 15000)
       });
     }
 
@@ -173,7 +173,7 @@ const server = http.createServer(async (request, response) => {
       if (!room) return sendJson(response, 404, { error: "联机房间已失效。" });
       const playerId = url.searchParams.get("playerId");
       return sendJson(response, 200, {
-        players: [...room.players.values()].filter(player => player.id !== playerId && Date.now() - player.updatedAt < 5000),
+        players: [...room.players.values()].filter(player => player.id !== playerId && Date.now() - player.updatedAt < 15000),
         startAt: room.startAt || 0,
         serverNow: Date.now(),
         finishDistance: room.finishDistance
