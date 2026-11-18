@@ -470,12 +470,15 @@ function syncRemoteCarVisual() {
   const elapsed = Math.max(0, Math.min(0.25, (Date.now() - o.at) / 1000));
   // 上报速度单位换算成实际前进：speed * 90 / 3.6 米每秒
   const projected = o.distance + (o.speed * 90 / 3.6) * elapsed;
-  const rel = projected - raceDistance;             // 真实差距，1 米 = 1 米
-  const targetZ = Math.max(-560, Math.min(80, -rel));
+  const rel = projected - raceDistance;             // 真实差距：正整数=他领先，负数=我领先
+  // 1 米就是 1 米，不做任何夹取/压缩，否则对手会被"钉"在你身边看起来一起走
+  const targetZ = -rel;
   const targetX = o.x + trackCurve(projected);
   remoteCar.group.position.z += (targetZ - remoteCar.group.position.z) * 0.6;
   remoteCar.group.position.x += (targetX - remoteCar.group.position.x) * 0.6;
   remoteCar.group.rotation.y = -o.heading;
+  // 拉开太远就干脆不画（交给屏幕提示条和小地图显示）
+  remoteCar.group.visible = Math.abs(rel) < 420;
   updateRivalMarker(rel);
   refreshGapHud();
 }
