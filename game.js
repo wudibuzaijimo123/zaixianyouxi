@@ -1449,9 +1449,9 @@ const traffic = [];
 const trafficColors = [0x111111, 0x0055ff, 0xcc2222, 0x888888, 0x1e3a5f];
 const TRAFFIC_REFERENCE_SPEED_KMH = 200;
 const TRAFFIC_IDLE_INTERVAL_MS = 1450;
-const TRAFFIC_FAST_INTERVAL_MS = 760;
+const TRAFFIC_FAST_INTERVAL_MS = 950;
 const TRAFFIC_MAX_ACTIVE = 32;
-const TRAFFIC_DOUBLE_WAVE_RATIO = 0.5;
+const TRAFFIC_DOUBLE_WAVE_RATIO = 0.3;
 let trafficDensityAccumulator = 0;
 
 function spawnTraffic() {
@@ -1751,10 +1751,14 @@ function resetGame() {
   scoreEl.textContent = formatRaceTime(0);
   nitroBar.style.width = "100%";
 
-  // 开局立即在前方车道生成 6 辆巡航车流，绝不让道路空旷！
-  const initialZ = [-60, -95, -130, -170, -210, -255, -300, -350, -400, -455, -510, -570];
-  initialZ.forEach((z, idx) => {
-    const laneIndex = idx % LANE_COUNT;
+  // 开局生成 6 辆车：左右并排时给中间留通道，部分波次有中间车。
+  const initialTraffic = [
+    [-90, 0], [-90, 2],
+    [-185, 1],
+    [-300, 0], [-300, 2],
+    [-440, 1]
+  ];
+  initialTraffic.forEach(([z, laneIndex], idx) => {
     const laneX = -ROAD_WIDTH / 2 + laneIndex * LANE_WIDTH + LANE_WIDTH / 2;
     const color = trafficColors[idx % trafficColors.length];
     const enemy = createTeslaCar(false, color);
@@ -2168,7 +2172,7 @@ function update() {
   });
 
   // 5. 敌车刷新与真实碰撞检测 (高频刷新车流，丰富自驾驾驶感)
-  // 按真实时间刷车（不受帧率影响）：静止 1.45 秒一次，达到 200 km/h 后 0.76 秒一次
+  // 按真实时间刷车（不受帧率影响）：静止 1.45 秒一次，达到 200 km/h 后 0.95 秒一次
   const nowMs = Date.now();
   const trafficSpeedRatio = Math.max(0, Math.min(1, (currentSpeed * 90) / TRAFFIC_REFERENCE_SPEED_KMH));
   const trafficInterval = TRAFFIC_IDLE_INTERVAL_MS -
