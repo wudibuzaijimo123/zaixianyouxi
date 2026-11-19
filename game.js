@@ -1462,8 +1462,9 @@ function spawnTraffic() {
 
   // 一定概率一次刷出并排的车，只留一条缝，逼玩家变道
   const blockCount = Math.random() < 0.36 ? 2 : (Math.random() < 0.12 ? 3 : 1);
-  const freeLanes = Math.max(1, LANE_COUNT - blockCount);
-  const startLane = Math.floor(Math.random() * freeLanes);
+  // Choose from every valid contiguous start so no lane is permanently left open.
+  const maxStartLane = Math.max(0, LANE_COUNT - blockCount);
+  const startLane = Math.floor(Math.random() * (maxStartLane + 1));
 
   for (let i = 0; i < blockCount; i++) {
     const laneIndex = Math.min(LANE_COUNT - 1, startLane + i);
@@ -2205,16 +2206,10 @@ function update() {
         const push = Math.sign(pPos.x - ePos.x) || (Math.random() < 0.5 ? -1 : 1);
         const bound = ROAD_WIDTH / 2 - 1.8;
 
-        // 自己的车被顶开，速度掉到三成，车头甩一下
-        carPhysics.x = Math.max(-bound, Math.min(bound, carPhysics.x + push * 1.6));
+        // 碰撞只把玩家车弹开；AI 车保持车道和行驶轨迹，不自动闪避。
+        carPhysics.x = Math.max(-bound, Math.min(bound, carPhysics.x + push * 2.15));
         carPhysics.heading += push * 0.16;
         baseSpeed = Math.max(0, baseSpeed * 0.32);
-
-        // 对方车也被撞歪，往反方向挪一条缝并减速
-        enemy.laneX = Math.max(-ROAD_WIDTH / 2 + 1.2, Math.min(ROAD_WIDTH / 2 - 1.2, enemy.laneX - push * 2.4));
-        enemy.group.position.z += 2.5;
-        enemy.speed = Math.max(0.06, enemy.speed * 0.55);
-        enemy.group.rotation.y += push * 0.25;
 
         showImpact("剐蹭 · 撞开减速", ePos.x, ePos.z, true);
         sound.playCrash();
