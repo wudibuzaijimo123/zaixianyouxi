@@ -16,6 +16,24 @@ function activePlayers(room) {
   return [...room.players.values()].filter(p => now - p.updatedAt < ACTIVE_MS);
 }
 
+function scheduleRaceStart(room) {
+  const now = Date.now();
+  // Reused room codes must start a clean round; otherwise the previous
+  // finishAt keeps reporting raceOver to the next pair of players.
+  room.finishAt = 0;
+  for (const player of room.players.values()) {
+    player.x = 0;
+    player.heading = 0;
+    player.speed = 0;
+    player.distance = 0;
+    player.finished = false;
+    delete player.finishTime;
+    delete player.finishSpeed;
+    player.updatedAt = now;
+  }
+  room.startAt = now + 4000;
+}
+
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -124,7 +142,7 @@ const server = http.createServer(async (request, response) => {
       if (activeCount < 2) {
         room.startAt = 0;   // 只有一个人在房间里：绝不开赛
       } else if (!room.startAt) {
-        room.startAt = Date.now() + 4000;
+        scheduleRaceStart(room);
       }
 
       return sendJson(response, 200, {
@@ -160,7 +178,7 @@ const server = http.createServer(async (request, response) => {
       // 只有"两人都在场"才安排发车；发车之后即使有人短暂掉线也不重排
       const activeCount = activePlayers(room).length;
       if (activeCount >= 2) {
-        if (!room.startAt) room.startAt = Date.now() + 4000;
+        if (!room.startAt) scheduleRaceStart(room);
       } else if (room.startAt && Date.now() < room.startAt) {
         room.startAt = 0;   // 还没发车就走了一个：取消这次发车
       }
