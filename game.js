@@ -2196,7 +2196,9 @@ function update() {
     const dx = Math.abs(pPos.x - ePos.x);
     const dz = Math.abs((pPos.z - 1.3) - (ePos.z - 1.3));
 
-    if (dx < 1.85 && dz < 4.2) {
+    // 覆盖半条车道，压着车道分界线也不能从车流中间无损穿过。
+    const lateralHitRange = LANE_WIDTH / 2 + 0.15;
+    if (dx < lateralHitRange && dz < 4.2) {
       // 实体碰撞：车辆保持原轨迹，玩家减速并获得撞击反馈。
       if (Date.now() > (enemy.hitUntil || 0)) {
         enemy.hitUntil = Date.now() + 900;
