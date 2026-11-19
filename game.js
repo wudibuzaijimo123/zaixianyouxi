@@ -1449,8 +1449,9 @@ const traffic = [];
 const trafficColors = [0x111111, 0x0055ff, 0xcc2222, 0x888888, 0x1e3a5f];
 const TRAFFIC_REFERENCE_SPEED_KMH = 200;
 const TRAFFIC_IDLE_INTERVAL_MS = 1450;
-const TRAFFIC_FAST_INTERVAL_MS = 620;
+const TRAFFIC_FAST_INTERVAL_MS = 760;
 const TRAFFIC_MAX_ACTIVE = 32;
+const TRAFFIC_DOUBLE_WAVE_RATIO = 0.5;
 let trafficDensityAccumulator = 0;
 
 function spawnTraffic() {
@@ -1460,19 +1461,19 @@ function spawnTraffic() {
 
   // 按车速累积决定额外车辆：同速、同波次时各设备刷出相同数量。
   const speedRatio = Math.max(0, Math.min(1, (currentSpeed * 90) / TRAFFIC_REFERENCE_SPEED_KMH));
-  trafficDensityAccumulator += speedRatio;
+  trafficDensityAccumulator += speedRatio * TRAFFIC_DOUBLE_WAVE_RATIO;
   let blockCount = 1;
   if (trafficDensityAccumulator >= 1) {
     blockCount = 2;
     trafficDensityAccumulator -= 1;
   }
   const carsToSpawn = Math.min(blockCount, availableSlots);
-  // Choose from every valid contiguous start so no lane is permanently left open.
-  const maxStartLane = Math.max(0, LANE_COUNT - carsToSpawn);
-  const startLane = Math.floor(Math.random() * (maxStartLane + 1));
+  // Choose distinct lanes randomly; some rows leave the middle lane open.
+  const availableLanes = Array.from({ length: LANE_COUNT }, (_, laneIndex) => laneIndex);
 
   for (let i = 0; i < carsToSpawn; i++) {
-    const laneIndex = Math.min(LANE_COUNT - 1, startLane + i);
+    const lanePick = Math.floor(Math.random() * availableLanes.length);
+    const laneIndex = availableLanes.splice(lanePick, 1)[0];
     const laneX = -ROAD_WIDTH / 2 + laneIndex * LANE_WIDTH + LANE_WIDTH / 2;
     const color = trafficColors[Math.floor(Math.random() * trafficColors.length)];
     const enemy = createTeslaCar(false, color);
@@ -2167,7 +2168,7 @@ function update() {
   });
 
   // 5. 敌车刷新与真实碰撞检测 (高频刷新车流，丰富自驾驾驶感)
-  // 按真实时间刷车（不受帧率影响）：静止 1.45 秒一次，达到 200 km/h 后 0.62 秒一次
+  // 按真实时间刷车（不受帧率影响）：静止 1.45 秒一次，达到 200 km/h 后 0.76 秒一次
   const nowMs = Date.now();
   const trafficSpeedRatio = Math.max(0, Math.min(1, (currentSpeed * 90) / TRAFFIC_REFERENCE_SPEED_KMH));
   const trafficInterval = TRAFFIC_IDLE_INTERVAL_MS -
