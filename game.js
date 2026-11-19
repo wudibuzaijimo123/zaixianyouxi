@@ -281,11 +281,35 @@ function ensureCountdownEl() {
   return el;
 }
 
+function cancelPendingRaceCountdown() {
+  if (raceSync.launched) return;
+  const wasPending = raceSync.armed || Boolean(raceSync.countdownTimer);
+  raceSync.armed = false;
+  raceSync.locked = false;
+  raceSync.lockGuardAt = 0;
+  raceSync.startAt = 0;
+  if (raceSync.countdownTimer) {
+    clearTimeout(raceSync.countdownTimer);
+    raceSync.countdownTimer = null;
+  }
+  const countdown = document.querySelector("#raceCountdown");
+  if (countdown) countdown.style.display = "none";
+  if (wasPending && roomCode) {
+    const status = document.querySelector("#roomStatus");
+    if (status) status.textContent = `房间 ${roomCode} · 等待两位车手都在房间内，再开始倒计时`;
+  }
+}
+
 function applyRaceStart(payload) {
-  if (!payload || !payload.startAt) return;
+  const playerCount = Number(payload?.playerCount);
+  const startAt = Number(payload?.startAt) || 0;
+  if (!payload || !Number.isFinite(playerCount) || playerCount < 2 || !startAt) {
+    cancelPendingRaceCountdown();
+    return;
+  }
   const serverNow = Number(payload.serverNow) || Date.now();
   const clockOffset = serverNow - Date.now();          // 服务器时钟领先本地的毫秒数
-  const localStart = Number(payload.startAt) - clockOffset;
+  const localStart = startAt - clockOffset;
   // 已经发车了就忽略服务端后续的时刻变化，避免比赛被打断
   if (raceSync.armed && Date.now() > raceSync.startAt) return;
   if (raceSync.armed && Math.abs(localStart - raceSync.startAt) < 1000) return;
@@ -301,7 +325,7 @@ function applyRaceStart(payload) {
 }
 
 function startMultiRaceCountdown() {
-  if (raceSync.launched || raceSync.countdownTimer) return;
+  if (!raceSync.armed || !raceSync.startAt || raceSync.launched || raceSync.countdownTimer) return;
   raceSync.locked = true;
   const el = ensureCountdownEl();
   const status = document.querySelector("#roomStatus");
@@ -371,12 +395,7 @@ async function syncRaceRoom() {
     });
     applyRaceStart(posted);
     if (posted.raceOver) forceEndRace();
-    // 兜底：两人都在房间里但服务端暂时没给出统一时刻（例如刚被重置），本地 3 秒后发车
-    if (!raceSync.armed && Number(posted.playerCount) >= 2) {
-      raceSync.startAt = Date.now() + 3000;
-      raceSync.armed = true;
-      startMultiRaceCountdown();
-    }
+    // 只接受服务端发来的统一起跑时刻；客户端不再自行启动倒计时。
     // 服务端在一次 POST 里就带回对手，省掉每帧一次的 GET（手机端明显更流畅）
     let other = (posted.players || [])[0];
     if (!posted.players) {
@@ -1445,6 +1464,39 @@ const PHYS = {
 // ═══════════════════════════════════════
 // 敌车与金币管理
 // ═══════════════════════════════════════
+const VEHICLE_COLLISION_HALF_WIDTH = 1.2;
+const VEHICLE_COLLISION_HALF_LENGTH = 2.45;
+const VEHICLE_COLLISION_CENTER_Z = -1.5;
+
+function vehiclesOverlap(first, second) {
+  const makeFrame = vehicle => {
+    const yaw = vehicle.group.rotation.y;
+    return {
+      center: {
+        x: vehicle.group.position.x + Math.sin(yaw) * VEHICLE_COLLISION_CENTER_Z,
+        z: vehicle.group.position.z + Math.cos(yaw) * VEHICLE_COLLISION_CENTER_Z
+      },
+      widthAxis: { x: Math.cos(yaw), z: -Math.sin(yaw) },
+      lengthAxis: { x: Math.sin(yaw), z: Math.cos(yaw) }
+    };
+  };
+  const a = makeFrame(first);
+  const b = makeFrame(second);
+  const dx = b.center.x - a.center.x;
+  const dz = b.center.z - a.center.z;
+  const axes = [a.widthAxis, a.lengthAxis, b.widthAxis, b.lengthAxis];
+  const dot = (left, right) => left.x * right.x + left.z * right.z;
+
+  return axes.every(axis => {
+    const distance = Math.abs(dx * axis.x + dz * axis.z);
+    const radiusA = VEHICLE_COLLISION_HALF_WIDTH * Math.abs(dot(a.widthAxis, axis)) +
+      VEHICLE_COLLISION_HALF_LENGTH * Math.abs(dot(a.lengthAxis, axis));
+    const radiusB = VEHICLE_COLLISION_HALF_WIDTH * Math.abs(dot(b.widthAxis, axis)) +
+      VEHICLE_COLLISION_HALF_LENGTH * Math.abs(dot(b.lengthAxis, axis));
+    return distance < radiusA + radiusB;
+  });
+}
+
 const traffic = [];
 const trafficColors = [0x111111, 0x0055ff, 0xcc2222, 0x888888, 0x1e3a5f];
 const TRAFFIC_REFERENCE_SPEED_KMH = 200;
@@ -2188,22 +2240,18 @@ function update() {
   for (let i = traffic.length - 1; i >= 0; i--) {
     const enemy = traffic[i];
     enemy.group.position.z += moveZ - enemy.speed * 1.0;
-    enemy.group.position.x = enemy.laneX + trackCurve(raceDistance - enemy.group.position.z);
+    const enemyRoadDistance = raceDistance - enemy.group.position.z;
+    enemy.group.position.x = enemy.laneX + trackCurve(enemyRoadDistance);
+    const enemyRoadSlope = (trackCurve(enemyRoadDistance + 4) - trackCurve(enemyRoadDistance - 4)) / 8;
+    enemy.group.rotation.y = -Math.atan(enemyRoadSlope);
     enemy.group.position.y = Math.sin(frame * 0.11 + i) * 0.01;
     enemy.group.rotation.z = Math.sin(frame * 0.08 + i) * 0.006;
     enemy.wheels.forEach(w => {
       w.spin.rotation.x += 0.35;
     });
 
-    // 碰撞盒 (特斯拉长 4.5m，后轴在原点，车体在 -3.4 到 0.9 之间)
-    const pPos = player.group.position;
-    const ePos = enemy.group.position;
-    const dx = Math.abs(pPos.x - ePos.x);
-    const dz = Math.abs((pPos.z - 1.3) - (ePos.z - 1.3));
-
-    // 覆盖半条车道，压着车道分界线也不能从车流中间无损穿过。
-    const lateralHitRange = LANE_WIDTH / 2 + 0.15;
-    if (dx < lateralHitRange && dz < 4.2) {
+    // 按 2.4m 车宽、4.9m 车长做旋转矩形碰撞；留有真实车身间隙即可通过。
+    if (vehiclesOverlap(player, enemy)) {
       // 实体碰撞：车辆保持原轨迹，玩家减速并获得撞击反馈。
       if (Date.now() > (enemy.hitUntil || 0)) {
         enemy.hitUntil = Date.now() + 900;

@@ -174,17 +174,18 @@ const server = http.createServer(async (request, response) => {
           if (Number.isFinite(sp) && sp > 0) player.finishSpeed = Math.round(sp * 90);
         }
       }
+      // 先刷新当前车手心跳，再统计在线人数，避免刚恢复连接时用旧时间误判房间人数。
+      player.updatedAt = room.updatedAt = Date.now();
       for (const [id, other] of room.players) {
         if (id !== body.playerId && Date.now() - other.updatedAt > 15000) room.players.delete(id);
       }
-      // 只有"两人都在场"才安排发车；发车之后即使有人短暂掉线也不重排
+      // 只有两位车手都在上报心跳时才安排统一倒计时；发车前有人离开就取消。
       const activeCount = activePlayers(room).length;
       if (activeCount >= 2) {
         if (!room.startAt) scheduleRaceStart(room);
       } else if (room.startAt && Date.now() < room.startAt) {
-        room.startAt = 0;   // 还没发车就走了一个：取消这次发车
+        room.startAt = 0;
       }
-      player.updatedAt = room.updatedAt = Date.now();
       // 临时诊断：每 5 秒打印一次房间内每位车手的里程，用于定位"原地不动"
       if (!room._logAt || Date.now() - room._logAt > 5000) {
         room._logAt = Date.now();
@@ -198,10 +199,10 @@ const server = http.createServer(async (request, response) => {
         startAt: room.startAt || 0,
         serverNow: Date.now(),
         finishDistance: room.finishDistance,
-        playerCount: activePlayers(room).length,
+        playerCount: activeCount,
         raceOver: Boolean(room.finishAt && Date.now() - room.finishAt > 5000),
-        // 顺手把对手状态带回去，省掉客户端每帧一次的 GET
-        players: [...room.players.values()].filter(p => p.id !== body.playerId && Date.now() - p.updatedAt < 15000)
+        // 只返回仍在上报心跳的对手，离线车手不冒充仍在房间。
+        players: activePlayers(room).filter(p => p.id !== body.playerId)
       });
     }
 
@@ -210,10 +211,11 @@ const server = http.createServer(async (request, response) => {
       if (!room) return sendJson(response, 404, { error: "联机房间已失效。" });
       const playerId = url.searchParams.get("playerId");
       return sendJson(response, 200, {
-        players: [...room.players.values()].filter(player => player.id !== playerId && Date.now() - player.updatedAt < 15000),
+        players: activePlayers(room).filter(player => player.id !== playerId),
         startAt: room.startAt || 0,
         serverNow: Date.now(),
-        finishDistance: room.finishDistance
+        finishDistance: room.finishDistance,
+        playerCount: activePlayers(room).length
       });
     }
 
@@ -246,7 +248,7 @@ const server = http.createServer(async (request, response) => {
       });
 
       const push = () => {
-        const players = [...room.players.values()].filter(p => p.id !== viewerId);
+        const players = activePlayers(room).filter(p => p.id !== viewerId);
         const data = {
           players,
           startAt: room.startAt || 0,
