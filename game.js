@@ -1449,6 +1449,9 @@ const PHYS = {
 // ═══════════════════════════════════════
 const traffic = [];
 const trafficColors = [0x111111, 0x0055ff, 0xcc2222, 0x888888, 0x1e3a5f];
+const TRAFFIC_REFERENCE_SPEED_KMH = 200;
+const TRAFFIC_IDLE_INTERVAL_MS = 1450;
+const TRAFFIC_FAST_INTERVAL_MS = 620;
 
 function spawnTraffic() {
   // 车流上限：电脑 48；手机按实时帧率自适应（掉帧就少刷，防止卡死）
@@ -2166,9 +2169,11 @@ function update() {
   });
 
   // 5. 敌车刷新与真实碰撞检测 (高频刷新车流，丰富自驾驾驶感)
-  // 按真实时间刷车（不受帧率影响）：静止 1.45 秒一辆，满速约 0.62 秒一辆
+  // 按真实时间刷车（不受帧率影响）：静止 1.45 秒一次，达到 200 km/h 后 0.62 秒一次
   const nowMs = Date.now();
-  const trafficInterval = Math.max(620, 1450 - currentSpeed * 340);
+  const trafficSpeedRatio = Math.max(0, Math.min(1, (currentSpeed * 90) / TRAFFIC_REFERENCE_SPEED_KMH));
+  const trafficInterval = TRAFFIC_IDLE_INTERVAL_MS -
+    (TRAFFIC_IDLE_INTERVAL_MS - TRAFFIC_FAST_INTERVAL_MS) * trafficSpeedRatio;
   if (nowMs - lastTrafficAt > trafficInterval) {
     lastTrafficAt = nowMs;
     spawnTraffic();

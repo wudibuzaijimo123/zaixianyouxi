@@ -129,8 +129,10 @@ const server = http.createServer(async (request, response) => {
       }
       const playerId = Math.random().toString(36).slice(2, 12);
       // 起跑车道和车身颜色都由服务器分配，两边看到的是同一套
-      const lane = room.players.size === 0 ? -1 : 1;
-      const color = room.players.size === 0 ? "#ffffff" : "#ff9a3c";
+      const occupiedLanes = new Set([...room.players.values()].map(player => player.lane));
+      const lane = occupiedLanes.has(-1) ? 1 : -1;
+      // 颜色只做区分；选相近亮度，避免某个车手更醒目而占视觉优势。
+      const color = lane === -1 ? "#29a3ff" : "#ff9a3c";
       room.players.set(playerId, {
         id: playerId, name, lane, color, x: 0, heading: 0, speed: 0, distance: 0,
         finished: false, updatedAt: Date.now()
