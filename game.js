@@ -2196,18 +2196,13 @@ function update() {
     const dz = Math.abs((pPos.z - 1.3) - (ePos.z - 1.3));
 
     if (dx < 1.85 && dz < 4.2) {
-      // 实体碰撞：双方弹开 + 掉速，比赛继续，不判出局
+      // 实体碰撞：车辆保持原轨迹，玩家减速并获得撞击反馈。
       if (Date.now() > (enemy.hitUntil || 0)) {
-        enemy.hitUntil = Date.now() + 600;
-        const push = Math.sign(pPos.x - ePos.x) || (Math.random() < 0.5 ? -1 : 1);
-        const bound = ROAD_WIDTH / 2 - 1.8;
-
-        // 碰撞只把玩家车弹开；AI 车保持车道和行驶轨迹，不自动闪避。
-        carPhysics.x = Math.max(-bound, Math.min(bound, carPhysics.x + push * 2.15));
-        carPhysics.heading += push * 0.16;
+        enemy.hitUntil = Date.now() + 900;
+        // 不横推玩家车，也不移动 AI 车；碰撞用减速、音效、震动和镜头反馈表现。
         baseSpeed = Math.max(0, baseSpeed * 0.32);
 
-        showImpact("剐蹭 · 撞开减速", ePos.x, ePos.z, true);
+        showImpact("碰撞 · 减速", ePos.x, ePos.z, true);
         sound.playCrash();
         triggerHaptic([50, 30, 70]);
         cameraTrauma = Math.min(1, cameraTrauma + 0.5);
