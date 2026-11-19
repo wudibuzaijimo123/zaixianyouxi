@@ -1486,6 +1486,24 @@ function reduceSpeedAfterImpact(speed) {
     : speed;
 }
 
+const LANE_KEEPING_STRENGTH = 2.8;
+const LANE_KEEPING_MIN_SPEED = 0.15;
+
+function nearestLaneCenter(x) {
+  const laneIndex = Math.max(0, Math.min(
+    LANE_COUNT - 1,
+    Math.round((x + ROAD_WIDTH / 2) / LANE_WIDTH - 0.5)
+  ));
+  return -ROAD_WIDTH / 2 + (laneIndex + 0.5) * LANE_WIDTH;
+}
+
+function applyLaneKeeping(x, steering, speed, dt) {
+  if (Math.abs(steering) > 0.01 || speed < LANE_KEEPING_MIN_SPEED) return x;
+  const target = nearestLaneCenter(x);
+  const blend = 1 - Math.exp(-LANE_KEEPING_STRENGTH * dt);
+  return x + (target - x) * blend;
+}
+
 function vehiclesOverlap(first, second) {
   const makeFrame = vehicle => {
     const yaw = vehicle.group.rotation.y;
@@ -2162,6 +2180,8 @@ function update() {
   const forwardVel = currentSpeed * 17.0;
   const lateralVel = forwardVel * Math.sin(carPhysics.heading);
   carPhysics.x += lateralVel * dt;
+  // 松开方向后回到最近车道中心；转向过程中不干预，保留连续变道手感。
+  carPhysics.x = applyLaneKeeping(carPhysics.x, targetSteer, currentSpeed, dt);
 
   // 护栏阻挡
   const maxBound = ROAD_WIDTH / 2 - 1.8;
