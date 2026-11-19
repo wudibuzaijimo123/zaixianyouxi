@@ -1467,6 +1467,24 @@ const PHYS = {
 const VEHICLE_COLLISION_HALF_WIDTH = 1.2;
 const VEHICLE_COLLISION_HALF_LENGTH = 2.45;
 const VEHICLE_COLLISION_CENTER_Z = -1.5;
+const PLAYER_IMPACT_COOLDOWN_MS = 700;
+const PLAYER_IMPACT_SPEED_FLOOR = 0.55;
+const PLAYER_IMPACT_SPEED_FACTOR = 0.72;
+let playerImpactCooldownUntil = 0;
+
+function registerPlayerImpact(enemy, impactNow) {
+  if (impactNow <= (enemy.hitUntil || 0)) return false;
+  enemy.hitUntil = impactNow + 900;
+  if (impactNow < playerImpactCooldownUntil) return false;
+  playerImpactCooldownUntil = impactNow + PLAYER_IMPACT_COOLDOWN_MS;
+  return true;
+}
+
+function reduceSpeedAfterImpact(speed) {
+  return speed > PLAYER_IMPACT_SPEED_FLOOR
+    ? Math.max(PLAYER_IMPACT_SPEED_FLOOR, speed * PLAYER_IMPACT_SPEED_FACTOR)
+    : speed;
+}
 
 function vehiclesOverlap(first, second) {
   const makeFrame = vehicle => {
@@ -1800,6 +1818,7 @@ function resetGame() {
   finishSpeed = 0;
   lastTrafficAt = 0;
   trafficDensityAccumulator = 0;
+  playerImpactCooldownUntil = 0;
   scoreEl.textContent = formatRaceTime(0);
   nitroBar.style.width = "100%";
 
@@ -2251,18 +2270,14 @@ function update() {
     });
 
     // 按 2.4m 车宽、4.9m 车长做旋转矩形碰撞；留有真实车身间隙即可通过。
-    if (vehiclesOverlap(player, enemy)) {
-      // 实体碰撞：车辆保持原轨迹，玩家减速并获得撞击反馈。
-      if (Date.now() > (enemy.hitUntil || 0)) {
-        enemy.hitUntil = Date.now() + 900;
-        // 不横推玩家车，也不移动 AI 车；碰撞用减速、音效、震动和镜头反馈表现。
-        baseSpeed = Math.max(0, baseSpeed * 0.32);
-
-        showImpact("碰撞 · 减速", ePos.x, ePos.z, true);
-        sound.playCrash();
-        triggerHaptic([50, 30, 70]);
-        cameraTrauma = Math.min(1, cameraTrauma + 0.5);
-      }
+    const ePos = enemy.group.position;
+    // 同一瞬间撞到多辆车只结算一次；最低滚行速度避免连续碰撞把车压停。
+    if (vehiclesOverlap(player, enemy) && registerPlayerImpact(enemy, Date.now())) {
+      baseSpeed = reduceSpeedAfterImpact(baseSpeed);
+      showImpact("碰撞 · 减速", ePos.x, ePos.z, true);
+      sound.playCrash();
+      triggerHaptic([50, 30, 70]);
+      cameraTrauma = Math.min(1, cameraTrauma + 0.5);
     }
 
     if (enemy.group.position.z > 25 || enemy.group.position.z < -650) {
