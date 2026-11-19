@@ -10,15 +10,17 @@
 const TRAFFIC_REFERENCE_SPEED_KMH = 200;
 const TRAFFIC_IDLE_INTERVAL_MS = 1450;
 const TRAFFIC_FAST_INTERVAL_MS = 620;
+const TRAFFIC_MAX_ACTIVE = 32;
 ```
 
 - `TRAFFIC_IDLE_INTERVAL_MS`：低速端的刷新间隔。改小会让低速和中速时刷得更频繁；例如 `1450` 改成 `1300`，静止时从约 1.45 秒缩短到 1.3 秒。
 - `TRAFFIC_FAST_INTERVAL_MS`：达到参考车速时的刷新间隔。改小会让高速时刷得更频繁；例如 `620` 改成 `560`，达到 200 km/h 时从约 0.62 秒缩短到 0.56 秒。
 - `TRAFFIC_REFERENCE_SPEED_KMH`：高速间隔对应的车速。当前为 200 km/h；达到或超过它后使用 `TRAFFIC_FAST_INTERVAL_MS`。
+- `TRAFFIC_MAX_ACTIVE`：手机和电脑共用的场上车辆上限，当前都是 32 辆。
 
 计算逻辑在 `update()` 中：车速越快，`trafficSpeedRatio` 越接近 1，算出的 `trafficInterval` 越小；当经过时间超过间隔时，`if` 条件调用 `spawnTraffic()`。因此它控制的是**每秒刷几波车**。
 
-每波刷几辆由 `spawnTraffic()` 里的 `blockCount` 决定；当前每波随机刷 1～3 辆，和车速无关。`fpsLimit` 则是场上车辆数量的性能上限，也不决定刷新间隔。
+每波刷几辆由 `spawnTraffic()` 里的 `trafficDensityAccumulator` 决定：速度比例累计到 1 时，该波刷 2 辆，否则刷 1 辆；因此同样车速和波次数时，手机和电脑刷出的车辆数相同。双车并排会留一条可通行车道。
 
 前端、后端、房间同步都跑在同一台阿里云服务器上（部署目录 `/opt/playcargame`，仓库根目录与之对应），页面与 `/api/*` 同源。
 
