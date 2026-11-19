@@ -344,8 +344,9 @@ function launchMultiRace() {
     overlay.classList.remove("hidden");
     return;
   }
-  // 真实车道：服务器给每人分配了左/右车道，画面上不再给对手加假的偏移
-  carPhysics.x = (raceSync.myLane || 0) * LANE_WIDTH * 0.5;
+  // 服务器给两位车手分配最左/最右车道，位置必须与 AI 车道中心对齐才能发生碰撞。
+  const playerLaneIndex = raceSync.myLane < 0 ? 0 : LANE_COUNT - 1;
+  carPhysics.x = -ROAD_WIDTH / 2 + (playerLaneIndex + 0.5) * LANE_WIDTH;
   player.group.position.x = carPhysics.x;
   // 车身颜色也用服务器分配的那套，两边看到的是同一世界
   if (raceSync.myColor && player.group.userData.paintMaterial) {
