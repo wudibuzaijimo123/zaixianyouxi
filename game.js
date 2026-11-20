@@ -89,14 +89,30 @@ function saveKeymap() {
 function renderKeymapButtons() {
   ["throttle", "brake", "boost", "left", "right"].forEach(action => {
     const btn = document.querySelector(`#key-${action}`);
-    if (btn && capturingKey !== action) btn.textContent = keyLabel(keymap[action]);
+    if (!btn) return;
+    btn.classList.toggle("capturing", capturingKey === action);
+    if (capturingKey !== action) btn.textContent = keyLabel(keymap[action]);
   });
+  updateControlTips();
+}
+
+function updateControlTips() {
+  const tipsEl = document.querySelector("#controlTips");
+  if (!tipsEl) return;
+  tipsEl.textContent = `${keyLabel(keymap.throttle)} 油门　${keyLabel(keymap.brake)} 刹车　${keyLabel(keymap.boost)} 氮气　${keyLabel(keymap.left)} / ${keyLabel(keymap.right)} 转向`;
 }
 
 function startKeyCapture(action) {
   capturingKey = action;
+  renderKeymapButtons();
   const btn = document.querySelector(`#key-${action}`);
   if (btn) btn.textContent = "按新键…";
+}
+
+function setMenuVisible(visible) {
+  overlay.classList.toggle("hidden", !visible);
+  document.body.classList.toggle("menu-open", visible);
+  if (visible) releaseAllInputs();
 }
 
 let best = Number(localStorage.getItem("neonRushBest") || 0);
@@ -207,6 +223,7 @@ async function enterRaceRoom(rawCode, mode = "join") {
     : `房间 ${roomCode} · 等待对手（让他也输 ${roomCode} 点「进入房间」）`;
   const input = document.querySelector("#roomCodeInput");
   if (input) input.value = roomCode;
+  document.querySelector("#roomControls")?.classList.add("in-room");
   setRoomBadge(roomCode);
   const lengthSelect = document.querySelector("#raceLength");
   if (lengthSelect) {
@@ -257,6 +274,12 @@ async function leaveRaceRoom(silent = false) {
   }
   const countdown = document.querySelector("#raceCountdown");
   if (countdown) countdown.style.display = "none";
+  document.querySelector("#roomControls")?.classList.remove("in-room");
+  const lengthSelect = document.querySelector("#raceLength");
+  if (lengthSelect) {
+    lengthSelect.disabled = false;
+    lengthSelect.title = "";
+  }
   setRoomBadge("");
   if (!silent) {
     document.querySelector("#roomStatus").textContent = "已退出房间，输入房间号可以重新进入";
@@ -365,7 +388,7 @@ function launchMultiRace() {
     if (status) status.textContent = `发车失败：${error.message}，点“开始比赛”重试`;
     const countdown = document.querySelector("#raceCountdown");
     if (countdown) countdown.style.display = "none";
-    overlay.classList.remove("hidden");
+    setMenuVisible(true);
     return;
   }
   // 服务器给两位车手分配最左/最右车道，位置必须与 AI 车道中心对齐才能发生碰撞。
@@ -378,7 +401,7 @@ function launchMultiRace() {
   }
   raceSync.renderOffsetX = 0;
   running = true;
-  overlay.classList.add("hidden");
+  setMenuVisible(false);
   document.querySelector("#roomStatus").textContent = "发车！";
   sound.startBGM();
   triggerHaptic([40, 60, 120]);
@@ -884,6 +907,11 @@ function syncAudioUI() {
   }
   if (soundStatus) {
     soundStatus.textContent = on ? "🔊 音效已开启" : "🔇 默认静音，点右上角喇叭开启";
+  }
+  const testBtn = document.querySelector("#testAudioBtn");
+  if (testBtn) {
+    testBtn.classList.toggle("playing", on && Boolean(sound.bgmAudio && !sound.bgmAudio.paused));
+    if (!on) testBtn.textContent = "🎵 点击试听 / 开启车载音乐";
   }
 }
 if (audioToggle) {
@@ -1873,7 +1901,7 @@ function startGame() {
   if (roomCode && raceSync.armed && Date.now() < raceSync.startAt) return;
   sound.ensureContext();
   running = true;
-  overlay.classList.add("hidden");
+  setMenuVisible(false);
 
   playerName = playerNameInput.value.trim() || "自驾游车友";
   localStorage.setItem("neonRacerName", playerName);
@@ -1928,7 +1956,7 @@ function finishRace() {
     }).catch(() => {});
   }
   document.querySelector("#start").textContent = "再跑一圈";
-  overlay.classList.remove("hidden");
+  setMenuVisible(true);
 }
 
 // 对手冲线 5 秒后你还没到终点 -> 强制结束（判负但保留成绩）
@@ -1948,7 +1976,7 @@ function forceEndRace() {
   }
   message.innerHTML = lines.join("<br>");
   document.querySelector("#start").textContent = "再来一局";
-  overlay.classList.remove("hidden");
+  setMenuVisible(true);
   setRoomBadge(roomCode, false, "比赛结束");
 }
 
@@ -1963,7 +1991,7 @@ async function endGame() {
   title.textContent = "旅程结束";
   message.innerHTML = `本次安全行驶得分：<b style="color:#61efff;font-size:24px">${finalScore}</b><br>避开车流，再挑战一次吧。`;
   document.querySelector("#start").textContent = "重新启程";
-  overlay.classList.remove("hidden");
+  setMenuVisible(true);
 
   // 撞击反馈
   document.body.classList.remove("crash-flash");
@@ -2411,8 +2439,7 @@ function renderLeaderboard(scores) {
   const myName = (playerNameInput?.value.trim() || playerName || localStorage.getItem("neonRacerName") || "").toLowerCase();
   leaderboardList.innerHTML = scores.map((item, index) => {
     const mine = myName && String(item.name || "").trim().toLowerCase() === myName;
-    const mark = mine ? ' style="color:#ffd166;text-shadow:0 0 10px rgba(255,209,102,.6)"' : "";
-    return `<li><strong${mark}>${index + 1}. ${escapeHtml(item.name)}</strong><span${mark}>${formatRaceTime(Number(item.time))}</span></li>`;
+    return `<li${mine ? ' class="mine"' : ""}><strong>${index + 1}. ${escapeHtml(item.name)}</strong><span>${formatRaceTime(Number(item.time))}</span></li>`;
   }).join("");
 }
 
@@ -2651,13 +2678,26 @@ function bindPedal(selector, key) {
 bindPedal("#throttle", "throttle");
 bindPedal("#brake", "brake");
 
-document.querySelector("#createRoom")?.addEventListener("click", async () => {
-  try { await enterRaceRoom(document.querySelector("#roomCodeInput")?.value, "create"); }
-  catch (error) { document.querySelector("#roomStatus").textContent = error.message; }
-});
-document.querySelector("#joinRoom")?.addEventListener("click", async () => {
-  try { await enterRaceRoom(document.querySelector("#roomCodeInput")?.value); }
-  catch (error) { document.querySelector("#roomStatus").textContent = error.message; }
+const createRoomBtn = document.querySelector("#createRoom");
+const joinRoomBtn = document.querySelector("#joinRoom");
+const roomCodeInputEl = document.querySelector("#roomCodeInput");
+async function handleRoomAction(btn, mode) {
+  if (btn) btn.disabled = true;
+  try {
+    await enterRaceRoom(roomCodeInputEl?.value, mode);
+  } catch (error) {
+    document.querySelector("#roomStatus").textContent = error.message || "连接房间失败";
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+createRoomBtn?.addEventListener("click", () => handleRoomAction(createRoomBtn, "create"));
+joinRoomBtn?.addEventListener("click", () => handleRoomAction(joinRoomBtn, "join"));
+roomCodeInputEl?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    handleRoomAction(joinRoomBtn, "join");
+  }
 });
 document.querySelector("#leaveRoom")?.addEventListener("click", () => {
   leaveRaceRoom(false).catch(() => {});
@@ -2688,10 +2728,8 @@ if (testAudioBtn) {
     sound.ensureContext();
     sound.startBGM();
     syncAudioUI();
-    testAudioBtn.textContent = "🎵 音乐正在播放中！(若无声请关闭iPhone左侧实体静音键)";
-    testAudioBtn.style.background = "rgba(40,230,120,0.25)";
-    testAudioBtn.style.borderColor = "#28e678";
-    testAudioBtn.style.color = "#28e678";
+    testAudioBtn.textContent = "🎵 音乐正在播放中";
+    testAudioBtn.classList.add("playing");
   });
 }
 
@@ -2710,6 +2748,7 @@ document.querySelector("#key-reset")?.addEventListener("click", () => {
 renderKeymapButtons();
 
 // 初始化
+setMenuVisible(true);
 applyTheme(currentTheme);
 syncAudioUI();
 layoutMinimap();
