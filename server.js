@@ -31,6 +31,8 @@ function laneStartX(lane) {
 
 function resetPlayerForLobby(player) {
   player.ready = false;
+  player.inRace = false;
+  player.resumeStartAt = 0;
   player.finished = false;
   player.x = laneStartX(player.lane);
   player.heading = 0;
@@ -92,6 +94,8 @@ function scheduleRaceStart(room) {
   for (const player of room.players.values()) {
     resetPlayerForLobby(player);
     player.ready = true;
+    player.inRace = true;
+    player.resumeStartAt = 0;
     player.updatedAt = now;
   }
   room.startAt = now + 3000;
@@ -110,6 +114,13 @@ function buildRoomSyncPayload(room, viewerId) {
   const viewer = viewerId ? room.players.get(viewerId) : null;
   const others = actives.filter(p => p.id !== viewerId);
   const pauseInfo = roomPauseInfo(room);
+  const ongoing = isRaceDriving(room);
+  const effectiveStartAt = ongoing
+    ? (viewer ? (viewer.inRace ? room.startAt : (viewer.resumeStartAt || 0)) : 0)
+    : (room.startAt || 0);
+  const myResumeDist = ongoing && viewer && !viewer.inRace && Number(viewer.distance) > 0
+    ? Math.round(Number(viewer.distance))
+    : 0;
   const finishRemainSec = room.finishAt ? Math.max(0, Math.ceil((10000 - (Date.now() - room.finishAt)) / 1000)) : 0;
   return {
     ok: true,
@@ -117,8 +128,12 @@ function buildRoomSyncPayload(room, viewerId) {
     hostId: room.hostId || "",
     configVersion: room.configVersion || 1,
     myReady: Boolean(viewer && viewer.ready),
-    otherReady: Boolean(others[0] && others[0].ready),
-    startAt: room.startAt || 0,
+    otherReady: Boolean(others[0] && (others[0].ready || others[0].inRace)),
+    myInRace: Boolean(ongoing && viewer && viewer.inRace),
+    otherInRace: Boolean(ongoing && others[0] && others[0].inRace),
+    raceDriving: ongoing,
+    myResumeDist,
+    startAt: effectiveStartAt,
     forceLobbyAt: room.forceLobbyAt || 0,
     serverNow: Date.now(),
     finishDistance: room.finishDistance,
@@ -281,12 +296,17 @@ const server = http.createServer(async (request, response) => {
         if (!ongoing && resumedSeat.id === room.hostId && !room.startAt) {
           applyHostSettings(room, body);
         }
+        if (ongoing && !resumedSeat.inRace) {
+          resumedSeat.ready = false;
+          resumedSeat.resumeStartAt = 0;
+        }
         const sync = buildRoomSyncPayload(room, resumedSeat.id);
         return sendJson(response, 200, {
           ...sync,
           roomCode,
           playerId: resumedSeat.id,
-          resumed: ongoing,
+          resumed: false,
+          canResumeRace: ongoing,
           distance: resumedSeat.distance || 0,
           x: Number.isFinite(resumedSeat.x) ? resumedSeat.x : laneStartX(resumedSeat.lane),
           speed: resumedSeat.speed || 0,
@@ -331,7 +351,9 @@ const server = http.createServer(async (request, response) => {
         name,
         lane,
         color,
-        ready: activeRaceOngoing ? true : false,
+        ready: false,
+        inRace: false,
+        resumeStartAt: 0,
         x: savedLeft ? (Number.isFinite(savedLeft.x) ? savedLeft.x : laneStartX(lane)) : laneStartX(lane),
         heading: savedLeft ? (savedLeft.heading || 0) : 0,
         speed: savedLeft ? (savedLeft.speed || 0) : 0,
@@ -344,7 +366,7 @@ const server = http.createServer(async (request, response) => {
       });
       room.updatedAt = Date.now();
 
-      // 进房只落座展示双方车道，绝不直接倒计时；必须等两位车手都确认配置后各自点“准备”才统一倒计时发车
+      // 进房先落座展示双人状态；若好友已在赛道上，对方卡片自动显示“已准备”，自己点“准备”倒计时即可从原位回归
       if (!activeRaceOngoing && !room.finishAt && !room.startAt) {
         room.startAt = 0;
       }
@@ -353,7 +375,8 @@ const server = http.createServer(async (request, response) => {
       return sendJson(response, 200, {
         ...sync,
         roomCode, playerId,
-        resumed: activeRaceOngoing,
+        resumed: false,
+        canResumeRace: activeRaceOngoing,
         distance: savedLeft ? (savedLeft.distance || 0) : 0,
         x: savedLeft ? (Number.isFinite(savedLeft.x) ? savedLeft.x : laneStartX(lane)) : laneStartX(lane),
         speed: savedLeft ? (savedLeft.speed || 0) : 0,
@@ -370,8 +393,19 @@ const server = http.createServer(async (request, response) => {
       const room = raceRooms.get(String(body.roomCode || "").toUpperCase());
       if (!room || !room.players.has(body.playerId)) return sendJson(response, 404, { error: "联机房间已失效。" });
       const player = room.players.get(body.playerId);
-      for (const key of ["x", "heading", "speed", "distance", "time", "score", "nitro"]) {
-        player[key] = Number.isFinite(Number(body[key])) ? Number(body[key]) : player[key];
+      const ignoreStaleDrivePacket = body.inRace === true && Date.now() - (player.exitedLobbyAt || 0) < 600;
+      const enteringOrDriving = !ignoreStaleDrivePacket && (body.inRace === true || player.inRace || !isRaceDriving(room));
+      if (enteringOrDriving) {
+        for (const key of ["x", "heading", "speed", "distance", "time", "score", "nitro"]) {
+          if (body[key] !== undefined && Number.isFinite(Number(body[key]))) {
+            player[key] = Number(body[key]);
+          }
+        }
+      }
+      if (body.inRace === true && !ignoreStaleDrivePacket) {
+        player.inRace = true;
+        player.ready = true;
+        player.resumeStartAt = 0;
       }
       if (typeof body.finished === "boolean") {
         player.finished = body.finished;
@@ -421,6 +455,10 @@ const server = http.createServer(async (request, response) => {
       if (!room.startAt && !room.finishAt) {
         player.ready = Boolean(body.ready);
         maybeStartCountdown(room);
+      } else if (isRaceDriving(room) && !player.inRace) {
+        // 对手仍在跑时，自己点「准备」直接开启 3 秒个人发车倒计时，无需对方退回准备！
+        player.ready = Boolean(body.ready);
+        player.resumeStartAt = player.ready ? Date.now() + 3000 : 0;
       }
       return sendJson(response, 200, buildRoomSyncPayload(room, player.id));
     }
@@ -431,6 +469,28 @@ const server = http.createServer(async (request, response) => {
       if (!room || !room.players.has(body.playerId)) return sendJson(response, 404, { error: "联机房间已失效。" });
       const player = room.players.get(body.playerId);
       player.updatedAt = room.updatedAt = Date.now();
+      const exitToLobbyOnly = Boolean(body.exitToLobbyOnly);
+      if (exitToLobbyOnly) {
+        for (const key of ["x", "heading", "speed", "distance", "time", "score", "nitro"]) {
+          if (body[key] !== undefined && Number.isFinite(Number(body[key]))) {
+            player[key] = Number(body[key]);
+          }
+        }
+        player.inRace = false;
+        player.ready = false;
+        player.resumeStartAt = 0;
+        player.exitedLobbyAt = Date.now();
+        const anyoneStillRacing = [...room.players.values()].some(p => p.id !== player.id && p.inRace && isPlayerActive(room, p.id));
+        if (anyoneStillRacing) {
+          saveLeftSeat(room, player);
+          return sendJson(response, 200, { ...buildRoomSyncPayload(room, player.id), waitingOtherFinish: false, soloExitToLobby: true });
+        }
+        resetRoomToLobby(room);
+        room.forceLobbyAt = Date.now();
+        if (!room.hostId || !isPlayerActive(room, room.hostId)) room.hostId = player.id;
+        room.configVersion = (room.configVersion || 1) + 1;
+        return sendJson(response, 200, { ...buildRoomSyncPayload(room, player.id), waitingOtherFinish: false, soloExitToLobby: false });
+      }
       const forceLobby = Boolean(body.forceLobby);
       const waitingOtherFinish = !forceLobby && Boolean(
         room.finishAt &&
