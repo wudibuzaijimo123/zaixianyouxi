@@ -100,11 +100,9 @@ function scheduleRaceStart(room) {
 function maybeStartCountdown(room) {
   if (!room || room.startAt || room.finishAt) return false;
   const actives = activePlayers(room);
-  if (actives.length >= 2 && actives.every(p => Boolean(p.ready))) {
-    scheduleRaceStart(room);
-    return true;
-  }
-  return false;
+  return actives.length === 2 && actives.every(p => Boolean(p.ready))
+    ? (scheduleRaceStart(room), true)
+    : false;
 }
 
 function buildRoomSyncPayload(room, viewerId) {
@@ -235,7 +233,7 @@ const server = http.createServer(async (request, response) => {
         return sendJson(response, 400, { error: "房间号至少 3 位，两人输一样的号就能进同一个房间。" });
       }
       if (action === "create") {
-        const finishDistance = Math.max(300, Math.min(20000, Number(body.finishDistance) || 1500));
+        const finishDistance = Math.max(300, Math.min(20000, Number(body.finishDistance) || 5000));
         const validThemes = new Set(["country", "island", "jungle", "river"]);
         const theme = validThemes.has(body.theme) ? body.theme : "country";
         const validDiffs = new Set(["easy", "normal", "hard"]);
@@ -262,9 +260,14 @@ const server = http.createServer(async (request, response) => {
         });
       }
       if (!room.leftSeats) room.leftSeats = new Map();
+      const nameKey = `name:${name.trim().toLowerCase()}`;
       for (const [id, player] of room.players) {
         if (Date.now() - player.updatedAt > TIMEOUT_MS) {
           saveLeftSeat(room, player);
+          room.players.delete(id);
+        } else if (!isRaceDriving(room) && Date.now() - player.updatedAt >= ACTIVE_MS) {
+          // 大厅阶段直接清理超时离线(>3.5s)占位，避免多开/刷新出现 3 个幽灵座位
+          if (room.hostId === id) room.hostId = "";
           room.players.delete(id);
         }
       }
@@ -278,9 +281,8 @@ const server = http.createServer(async (request, response) => {
 
       // 支持误退出 / 刷新页面后按原 playerId 或同昵称重连回到当前对局
       const resumeId = String(body.resumePlayerId || "");
-      const nameKey = `name:${name.trim().toLowerCase()}`;
       let resumedSeat = (resumeId && room.players.get(resumeId)) || null;
-      if (!resumedSeat && room.players.size >= 2) {
+      if (!resumedSeat && (!isRaceDriving(room) || room.players.size >= 2)) {
         resumedSeat = [...room.players.values()].find(p => String(p.name || "").trim().toLowerCase() === name.trim().toLowerCase()) || null;
       }
       if (resumedSeat) {
