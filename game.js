@@ -2749,19 +2749,19 @@ function createStreetLamp() {
 // 对手车顶名字牌（联机真人标识，高对比胶囊底板+昵称，一眼与 AI 车辆区分）
 function makeNameTag(text) {
   const canvas = document.createElement("canvas");
-  canvas.width = 512;
-  canvas.height = 128;
+  canvas.width = 384;
+  canvas.height = 96;
   const ctx = canvas.getContext("2d");
-  ctx.clearRect(0, 0, 512, 128);
-  const label = String(text || "对手").trim().slice(0, 12) || "对手";
-  ctx.font = "900 44px 'Microsoft YaHei','PingFang SC','Rajdhani',sans-serif";
+  ctx.clearRect(0, 0, 384, 96);
+  const label = String(text || "对手").trim().slice(0, 10) || "对手";
+  ctx.font = "700 32px 'Microsoft YaHei','PingFang SC','Rajdhani',sans-serif";
   const textWidth = ctx.measureText(label).width;
-  const padX = 34;
-  const boxW = Math.min(492, Math.max(220, textWidth + padX * 2));
-  const boxH = 82;
-  const boxX = (512 - boxW) / 2;
-  const boxY = (128 - boxH) / 2;
-  const radius = 41;
+  const padX = 24;
+  const boxW = Math.min(364, Math.max(84, textWidth + padX * 2));
+  const boxH = 52;
+  const boxX = (384 - boxW) / 2;
+  const boxY = (96 - boxH) / 2;
+  const radius = 26;
 
   ctx.beginPath();
   ctx.moveTo(boxX + radius, boxY);
@@ -2775,27 +2775,26 @@ function makeNameTag(text) {
   ctx.quadraticCurveTo(boxX, boxY, boxX + radius, boxY);
   ctx.closePath();
 
-  ctx.fillStyle = "rgba(6, 16, 30, 0.86)";
+  ctx.fillStyle = "rgba(8, 18, 34, 0.72)";
   ctx.fill();
-  ctx.lineWidth = 4;
-  ctx.strokeStyle = "#61efff";
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = "rgba(97, 239, 255, 0.85)";
   ctx.stroke();
 
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.shadowColor = "rgba(0, 0, 0, 0.9)";
-  ctx.shadowBlur = 8;
-  ctx.fillStyle = "#e8fdff";
-  ctx.fillText(label, 256, 66);
+  ctx.shadowColor = "rgba(0, 0, 0, 0.75)";
+  ctx.shadowBlur = 4;
+  ctx.fillStyle = "#eafcff";
+  ctx.fillText(label, 192, 49);
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.needsUpdate = true;
   const sprite = new THREE.Sprite(
-    new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false, depthWrite: false })
+    new THREE.SpriteMaterial({ map: texture, transparent: true, opacity: 0.92, depthTest: true, depthWrite: false })
   );
-  sprite.scale.set(6.2, 1.55, 1);
-  sprite.position.set(0, 2.95, -0.6);
-  sprite.renderOrder = 999;
+  sprite.scale.set(2.7, 0.68, 1);
+  sprite.position.set(0, 2.08, -1.1);
   return sprite;
 }
 
