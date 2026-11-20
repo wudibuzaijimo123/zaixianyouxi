@@ -429,10 +429,18 @@ li span {
   backdrop-filter: blur(10px);
 }
 
-body.impact-flash #game-container { animation: impact-pulse .24s ease-out; }
-@keyframes impact-pulse {
-  0% { filter: brightness(1.65) saturate(1.55); }
-  100% { filter: brightness(1) saturate(1); }
+body.impact-flash::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 98;
+  box-shadow: inset 0 0 84px rgba(255, 92, 46, 0.42);
+  animation: impact-edge-fade .26s ease-out forwards;
+}
+@keyframes impact-edge-fade {
+  0% { opacity: 1; }
+  100% { opacity: 0; }
 }
 
 @keyframes nitro-flow {
