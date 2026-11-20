@@ -108,9 +108,11 @@ const server = http.createServer(async (request, response) => {
         const finishDistance = Math.max(300, Math.min(20000, Number(body.finishDistance) || 1500));
         const validThemes = new Set(["country", "island", "jungle", "river"]);
         const theme = validThemes.has(body.theme) ? body.theme : "country";
+        const validDiffs = new Set(["easy", "normal", "hard"]);
+        const difficulty = validDiffs.has(body.difficulty) ? body.difficulty : "normal";
         const existing = raceRooms.get(roomCode);
         if (!existing) {
-          raceRooms.set(roomCode, { players: new Map(), leftSeats: new Map(), hostId: "", updatedAt: Date.now(), startAt: 0, finishDistance, theme });
+          raceRooms.set(roomCode, { players: new Map(), leftSeats: new Map(), hostId: "", updatedAt: Date.now(), startAt: 0, finishDistance, theme, difficulty });
         }
       }
 
@@ -153,6 +155,7 @@ const server = http.createServer(async (request, response) => {
           serverNow: Date.now(),
           finishDistance: room.finishDistance,
           theme: room.theme || "country",
+          difficulty: room.difficulty || "normal",
           playerCount: activePlayers(room).length,
           lane: resumedSeat.lane,
           color: resumedSeat.color
@@ -210,6 +213,7 @@ const server = http.createServer(async (request, response) => {
         serverNow: Date.now(),
         finishDistance: room.finishDistance,
         theme: room.theme || "country",
+        difficulty: room.difficulty || "normal",
         playerCount: activePlayers(room).length,
         lane,
         color
@@ -232,10 +236,12 @@ const server = http.createServer(async (request, response) => {
           if (Number.isFinite(sp) && sp > 0) player.finishSpeed = Math.round(sp * 90);
         }
       }
-      // 只有房主在发车前可以切换房间赛道主题
+      // 只有房主在发车前可以切换房间赛道主题和难度
       const validThemes = new Set(["country", "island", "jungle", "river"]);
-      if (body.playerId === room.hostId && validThemes.has(body.theme) && (!room.startAt || Date.now() < room.startAt)) {
-        room.theme = body.theme;
+      const validDiffs = new Set(["easy", "normal", "hard"]);
+      if (body.playerId === room.hostId && (!room.startAt || Date.now() < room.startAt)) {
+        if (validThemes.has(body.theme)) room.theme = body.theme;
+        if (validDiffs.has(body.difficulty)) room.difficulty = body.difficulty;
       }
       // 先刷新当前车手心跳，再统计在线人数，避免刚恢复连接时用旧时间误判房间人数。
       player.updatedAt = room.updatedAt = Date.now();
@@ -263,6 +269,7 @@ const server = http.createServer(async (request, response) => {
         serverNow: Date.now(),
         finishDistance: room.finishDistance,
         theme: room.theme || "country",
+        difficulty: room.difficulty || "normal",
         playerCount: activeCount,
         raceOver: Boolean(room.finishAt && Date.now() - room.finishAt > 5000),
         // 只返回仍在上报心跳的对手，离线车手不冒充仍在房间。
@@ -280,6 +287,7 @@ const server = http.createServer(async (request, response) => {
         serverNow: Date.now(),
         finishDistance: room.finishDistance,
         theme: room.theme || "country",
+        difficulty: room.difficulty || "normal",
         playerCount: activePlayers(room).length
       });
     }
@@ -329,6 +337,7 @@ const server = http.createServer(async (request, response) => {
           serverNow: Date.now(),
           finishDistance: room.finishDistance,
           theme: room.theme || "country",
+          difficulty: room.difficulty || "normal",
           playerCount: activePlayers(room).length,
           raceOver: Boolean(room.finishAt && Date.now() - room.finishAt > 5000)
         };

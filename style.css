@@ -852,7 +852,7 @@ p {
 
 .menu-row {
   display: grid;
-  grid-template-columns: 1.4fr 1fr;
+  grid-template-columns: 1.2fr 1fr 1fr;
   gap: 10px;
   margin-top: 14px;
 }

@@ -233,9 +233,10 @@ async function enterRaceRoom(rawCode, mode = "join") {
         roomCode: code,
         name: playerNameInput.value.trim() || "车手",
         resumePlayerId: resumePlayerId || undefined,
-        // 距离和赛道主题只有房主（创建者）决定，加入方传了也会被服务端忽略
+        // 距离、主题和难度只有房主（创建者）决定，加入方传了也会被服务端忽略
         finishDistance: mode === "create" ? Number(document.querySelector("#raceLength")?.value || 1500) : undefined,
-        theme: mode === "create" ? currentTheme : undefined
+        theme: mode === "create" ? currentTheme : undefined,
+        difficulty: mode === "create" ? currentDifficulty : undefined
       });
       break;
     } catch (error) {
@@ -256,6 +257,9 @@ async function enterRaceRoom(rawCode, mode = "join") {
   if (result.theme && THEMES[result.theme] && result.theme !== currentTheme) {
     applyTheme(result.theme);
   }
+  if (result.difficulty && TRAFFIC_DIFFICULTIES[result.difficulty] && result.difficulty !== currentDifficulty) {
+    applyDifficulty(result.difficulty);
+  }
   const total = Number(result.playerCount) || 1;
   document.querySelector("#roomStatus").textContent = result.resumed
     ? `已重连回房间 ${roomCode} · 正在恢复当前对局…`
@@ -271,6 +275,11 @@ async function enterRaceRoom(rawCode, mode = "join") {
   if (lengthSelect) {
     lengthSelect.disabled = !isHost;
     lengthSelect.title = isHost ? "房主可修改比赛距离" : "比赛距离由房主决定";
+  }
+  const diffSelect = document.querySelector("#difficultySelect");
+  if (diffSelect) {
+    diffSelect.disabled = !isHost;
+    diffSelect.title = isHost ? "房主可修改车流难度" : "车流难度由房主决定";
   }
   setThemeLocked(!isHost);
   if (roomPollTimer) clearInterval(roomPollTimer);
@@ -322,6 +331,11 @@ async function leaveRaceRoom(silent = false) {
   if (lengthSelect) {
     lengthSelect.disabled = false;
     lengthSelect.title = "";
+  }
+  const diffSelect = document.querySelector("#difficultySelect");
+  if (diffSelect) {
+    diffSelect.disabled = false;
+    diffSelect.title = "";
   }
   raceSync.isHost = false;
   setThemeLocked(false);
@@ -412,6 +426,9 @@ function applyRaceStart(payload) {
     }
     if (!raceSync.isHost && payload.theme && THEMES[payload.theme] && payload.theme !== currentTheme) {
       applyTheme(payload.theme);
+    }
+    if (!raceSync.isHost && payload.difficulty && TRAFFIC_DIFFICULTIES[payload.difficulty] && payload.difficulty !== currentDifficulty) {
+      applyDifficulty(payload.difficulty);
     }
   }
   const playerCount = Number(payload?.playerCount);
@@ -508,7 +525,8 @@ async function syncRaceRoom() {
       heading: carPhysics.heading, speed: currentSpeed, distance: raceDistance,
       finished: !running && raceDistance >= finishDistance,
       time: raceTime,
-      theme: raceSync.isHost ? currentTheme : undefined
+      theme: raceSync.isHost ? currentTheme : undefined,
+      difficulty: raceSync.isHost ? currentDifficulty : undefined
     });
     applyRaceStart(posted);
     if (posted.raceOver) forceEndRace();
@@ -1963,16 +1981,53 @@ const TRAFFIC_IDLE_INTERVAL_MS = 1450;
 const TRAFFIC_FAST_INTERVAL_MS = 950;
 const TRAFFIC_MAX_ACTIVE = 32;
 const TRAFFIC_DOUBLE_WAVE_RATIO = 0.3;
+const TRAFFIC_DIFFICULTIES = {
+  easy: {
+    label: "休闲",
+    idleIntervalMs: 1850,
+    fastIntervalMs: 1250,
+    maxActive: 22,
+    doubleWaveRatio: 0.12
+  },
+  normal: {
+    label: "标准",
+    idleIntervalMs: TRAFFIC_IDLE_INTERVAL_MS,
+    fastIntervalMs: TRAFFIC_FAST_INTERVAL_MS,
+    maxActive: TRAFFIC_MAX_ACTIVE,
+    doubleWaveRatio: TRAFFIC_DOUBLE_WAVE_RATIO
+  },
+  hard: {
+    label: "地狱",
+    idleIntervalMs: 1100,
+    fastIntervalMs: 680,
+    maxActive: 42,
+    doubleWaveRatio: 0.55
+  }
+};
+let currentDifficulty = localStorage.getItem("racerDifficulty") || "normal";
+if (!TRAFFIC_DIFFICULTIES[currentDifficulty]) currentDifficulty = "normal";
 let trafficDensityAccumulator = 0;
 
+function getTrafficConfig() {
+  return TRAFFIC_DIFFICULTIES[currentDifficulty] || TRAFFIC_DIFFICULTIES.normal;
+}
+
+function applyDifficulty(diffKey) {
+  currentDifficulty = TRAFFIC_DIFFICULTIES[diffKey] ? diffKey : "normal";
+  localStorage.setItem("racerDifficulty", currentDifficulty);
+  const sel = document.querySelector("#difficultySelect");
+  if (sel) sel.value = currentDifficulty;
+}
+
 function spawnTraffic() {
+  const cfg = getTrafficConfig();
   // 各设备统一使用同一上限，避免手机与电脑的赛道车流量不同。
-  const availableSlots = TRAFFIC_MAX_ACTIVE - traffic.length;
+  const availableSlots = cfg.maxActive - traffic.length;
   if (availableSlots <= 0) return;
 
   // 按车速累积决定额外车辆：同速、同波次时各设备刷出相同数量。
   const speedRatio = Math.max(0, Math.min(1, (currentSpeed * 90) / TRAFFIC_REFERENCE_SPEED_KMH));
-  trafficDensityAccumulator += speedRatio * TRAFFIC_DOUBLE_WAVE_RATIO;
+  trafficDensityAccumulator += speedRatio * cfg.doubleWaveRatio;
   let blockCount = 1;
   if (trafficDensityAccumulator >= 1) {
     blockCount = 2;
@@ -2753,12 +2808,12 @@ function update() {
     }
   });
 
-  // 5. 敌车刷新与真实碰撞检测 (高频刷新车流，丰富自驾驾驶感)
-  // 按真实时间刷车（不受帧率影响）：静止 1.45 秒一次，达到 200 km/h 后 0.95 秒一次
+  // 5. 敌车刷新与真实碰撞检测 (按所选难度与实时车速动态刷车)
   const nowMs = Date.now();
+  const trafficCfg = getTrafficConfig();
   const trafficSpeedRatio = Math.max(0, Math.min(1, (currentSpeed * 90) / TRAFFIC_REFERENCE_SPEED_KMH));
-  const trafficInterval = TRAFFIC_IDLE_INTERVAL_MS -
-    (TRAFFIC_IDLE_INTERVAL_MS - TRAFFIC_FAST_INTERVAL_MS) * trafficSpeedRatio;
+  const trafficInterval = trafficCfg.idleIntervalMs -
+    (trafficCfg.idleIntervalMs - trafficCfg.fastIntervalMs) * trafficSpeedRatio;
   if (nowMs - lastTrafficAt > trafficInterval) {
     lastTrafficAt = nowMs;
     spawnTraffic();
@@ -3134,6 +3189,18 @@ if (quickSceneSelect) {
   });
 }
 
+const difficultySelect = document.querySelector("#difficultySelect");
+if (difficultySelect) {
+  difficultySelect.addEventListener("change", (e) => {
+    if (roomCode && !raceSync.isHost) {
+      e.target.value = currentDifficulty;
+      return;
+    }
+    applyDifficulty(e.target.value);
+    if (roomCode && raceSync.isHost) syncRaceRoom();
+  });
+}
+
 // 音量开关
 if (audioToggle) {
   audioToggle.addEventListener("click", () => {
@@ -3240,6 +3307,7 @@ renderKeymapButtons();
 // 初始化
 setMenuVisible(true);
 applyTheme(currentTheme);
+applyDifficulty(currentDifficulty);
 syncAudioUI();
 layoutMinimap();
 window.addEventListener("resize", () => layoutMinimap());
