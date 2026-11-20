@@ -138,9 +138,10 @@ let currentTheme = localStorage.getItem("racerSceneTheme") || "country";
 // 前端既可能在阿里云服务器上（与 /api 同源），也可能托管在 GitHub Pages 上（需跨域打 API 域名）。
 // 先试同源，失败自动回退到独立 API 域名，两边部署都不用改代码。
 const API_FALLBACK = "https://api.game.yhj123.dpdns.org";
-let apiBase = null;
+let apiBase = (window.location.protocol.startsWith("http") && !window.location.hostname.endsWith("github.io")) ? "" : null;
+let resolveApiPromise = null;
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 6500) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
   if (typeof AbortController === "undefined") {
     return fetch(url, options);
   }
@@ -155,16 +156,24 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 6500) {
 
 async function resolveApiBase() {
   if (apiBase !== null) return apiBase;
-  for (const base of ["", API_FALLBACK]) {
-    try {
-      const res = await fetchWithTimeout(`${base}/api/health`, { cache: "no-store" }, 2400);
-      if (res.ok) { apiBase = base; return base; }
-    } catch (error) {
-      // 试下一个
+  if (resolveApiPromise) return resolveApiPromise;
+  resolveApiPromise = (async () => {
+    for (const base of ["", API_FALLBACK]) {
+      try {
+        const res = await fetchWithTimeout(`${base}/api/health`, { cache: "no-store" }, 4500);
+        if (res.ok) { apiBase = base; return base; }
+      } catch (error) {
+        // 试下一个
+      }
     }
+    apiBase = API_FALLBACK;
+    return apiBase;
+  })();
+  try {
+    return await resolveApiPromise;
+  } finally {
+    resolveApiPromise = null;
   }
-  apiBase = "";
-  return apiBase;
 }
 
 const api = {
@@ -172,7 +181,7 @@ const api = {
     const base = await resolveApiBase();
     let res;
     try {
-      res = await fetchWithTimeout(`${base}${path}`, options, 6500);
+      res = await fetchWithTimeout(`${base}${path}`, options, 10000);
     } catch (error) {
       if (error && error.name === "AbortError") {
         throw new Error("连接服务器超时，请检查网络后再点一次");
@@ -324,6 +333,9 @@ async function enterRaceRoomSerial(rawCode, mode = "join") {
   const input = document.querySelector("#roomCodeInput");
   if (input) input.value = roomCode;
   document.querySelector("#roomControls")?.classList.add("in-room");
+  if (Array.isArray(result.players) && result.players[0]) {
+    updateRemoteCar(result.players[0]);
+  }
   setRoomBadge(roomCode, false, `${raceSync.playerCount}/2 人`);
   syncHostControlsLock();
   updateStartButtonForRoom();
@@ -1590,6 +1602,7 @@ renderer.shadowMap.enabled = !isMobileDevice;   // 手机端关阴影，帧率�
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 let cameraBank = 0;
+let cameraYaw = 0;
 function getCameraFraming() {
   const aspect = Math.max(0.35, window.innerWidth / Math.max(1, window.innerHeight));
   // 竖屏手机适度放宽视野并后撤拉高镜头，保证三车道、护栏与风景清晰可见，且车位于操作区上方
@@ -3715,6 +3728,8 @@ function resetGame() {
   document.querySelector("#raceProgressBar").style.width = "0%";
   document.querySelector("#raceProgressText").textContent = `0 / ${finishDistance} m`;
   cameraTrauma = 0;
+  cameraBank = 0;
+  cameraYaw = 0;
 
   carPhysics.x = 0;
   carPhysics.heading = 0;
@@ -4435,21 +4450,25 @@ function update(dtScale = 1) {
     }
   }
 
-  // 8. QQ飞车式流线切线追踪相机：过弯顺着弯道弧线平顺甩尾咬住车尾 + 阳光阴影跟随车位
+  // 8. QQ飞车式第三人称追焦相机：弹性跟踪车头漂移朝向，弯道与横滑牢牢跟随车尾不甩偏
   syncRemoteCarVisual();
   if (frame % (isMobileDevice ? 6 : 4) === 0) drawMinimap();
   const camFraming = getCameraFraming();
   const carWorldX = playerPt.x;
-  const lookAheadPt = trackWorldPoint(raceDistance + 20, carPhysics.x * 0.45, 0);
   const roadYaw = -playerPt.yaw;
-  const followDist = camFraming.baseZ + (accelerating || throttleHeld ? 0.40 : 0) + (boosting ? 0.82 : 0) - (braking && currentSpeed > 0.04 ? 0.48 : 0) + speedRatio * 1.15;
-  const targetCamX = carWorldX - Math.sin(roadYaw) * followDist - carPhysics.heading * 1.35;
-  const targetCamY = playerPt.y + camFraming.baseY + (boosting ? -0.20 : 0) + speedRatio * 0.26;
-  const targetCamZ = playerPt.z + Math.cos(roadYaw) * followDist;
+  const carFaceYaw = roadYaw + carPhysics.heading;
+  const yawFollowTarget = roadYaw + carPhysics.heading * 0.86;
+  cameraYaw += (yawFollowTarget - cameraYaw) * expEase(0.16);
 
-  camera.position.x += (targetCamX - camera.position.x) * expEase(0.145);
-  camera.position.y += (targetCamY - camera.position.y) * expEase(0.14);
-  camera.position.z += (targetCamZ - camera.position.z) * expEase(0.14);
+  const camDist = camFraming.baseZ + (accelerating || throttleHeld ? 0.36 : 0) + (boosting ? 0.85 : 0) - (braking && currentSpeed > 0.04 ? 0.45 : 0) + speedRatio * 1.1;
+  const driftPeek = Math.sin(carFaceYaw - cameraYaw) * 1.15;
+  const targetCamX = playerPt.x - Math.sin(cameraYaw) * camDist - driftPeek * Math.cos(cameraYaw);
+  const targetCamY = playerPt.y + camFraming.baseY + (boosting ? -0.18 : 0) + speedRatio * 0.24;
+  const targetCamZ = playerPt.z + Math.cos(cameraYaw) * camDist - driftPeek * Math.sin(cameraYaw);
+
+  camera.position.x += (targetCamX - camera.position.x) * expEase(0.42);
+  camera.position.y += (targetCamY - camera.position.y) * expEase(0.24);
+  camera.position.z += (targetCamZ - camera.position.z) * expEase(0.42);
 
   // 动态阴影视锥跟随当前赛车横向坐标，彻底杜绝转入深弯时路面阴影突然跳灭引起曝光闪烁
   sunLight.position.set(carWorldX + 26, 52, 22);
@@ -4474,8 +4493,11 @@ function update(dtScale = 1) {
   camera.fov += (targetFov - camera.fov) * expEase(0.08);
   camera.updateProjectionMatrix();
 
-  const lookTargetX = lookAheadPt.x * 0.72 + carWorldX * 0.28 + carPhysics.heading * 5.2;
-  const lookTargetZ = lookAheadPt.z;
+  const noseLookX = playerPt.x + Math.sin(cameraYaw) * 16;
+  const noseLookZ = playerPt.z - Math.cos(cameraYaw) * 16;
+  const roadAheadPt = trackWorldPoint(raceDistance + 16, carPhysics.x * 0.65, 0);
+  const lookTargetX = noseLookX * 0.80 + roadAheadPt.x * 0.20;
+  const lookTargetZ = noseLookZ * 0.80 + roadAheadPt.z * 0.20;
   camera.lookAt(lookTargetX, playerPt.y + camFraming.lookY, lookTargetZ);
   const targetBank = -carPhysics.heading * 0.075 - carPhysics.roll * 0.30 + playerPt.bankAngle * 0.45;
   cameraBank += (targetBank - cameraBank) * expEase(0.15);
@@ -4550,7 +4572,9 @@ async function loadLeaderboard() {
 // 全局交互与事件绑定 (确保苹果 iOS Safari 及全平台 100% 唤醒音频)
 // ═══════════════════════════════════════
 function unlockAudioAndHaptics(event) {
-  if (event && event.target && event.target.closest && event.target.closest("#audioToggle")) return;
+  if (event && event.target && event.target.closest) {
+    if (event.target.closest("#audioToggle") || event.target.closest("#roomControls")) return;
+  }
   sound.ensureContext();
   if (sound.enabled && sound.bgmAudio && sound.bgmAudio.paused) {
     sound.startBGM();
