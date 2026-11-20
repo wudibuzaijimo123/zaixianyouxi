@@ -272,6 +272,7 @@ async function enterRaceRoomSerial(rawCode, mode = "join") {
   raceSync.configVersion = Number(result.configVersion) || 1;
   raceSync.rematchQueued = false;
   raceSync.configChangedNotice = false;
+  raceSync.lastForceLobbyAt = Number(result.forceLobbyAt) || 0;
   raceSync.resumeState = result.resumed
     ? {
       distance: Number(result.distance) || 0,
@@ -376,6 +377,7 @@ async function leaveRaceRoom(silent = false, keepResume = false) {
   raceSync.configVersion = 0;
   raceSync.rematchQueued = false;
   raceSync.configChangedNotice = false;
+  raceSync.lastForceLobbyAt = 0;
   raceSync.pendingPaused = false;
   raceSync.pendingPausedReason = "";
   if (raceSync.countdownTimer) {
@@ -438,7 +440,8 @@ const raceSync = {
   configVersion: 0,
   rematchQueued: false,
   configChangedNotice: false,
-  lastConfigEditAt: 0
+  lastConfigEditAt: 0,
+  lastForceLobbyAt: 0
 };
 
 function getAssignedLaneX(lane) {
@@ -676,44 +679,73 @@ async function toggleRaceReady(nextReady) {
   }
 }
 
-async function requestRaceRematch() {
+function returnToRoomLobby(resPayload = null, customHint = "") {
+  running = false;
+  sound.stopBGM();
+  releaseAllInputs();
+  baseSpeed = 0;
+  currentSpeed = 0;
+  boosting = false;
+  setRacePaused(false);
+  raceSync.rematchQueued = false;
+  raceSync.launched = false;
+  raceSync.armed = false;
+  raceSync.locked = false;
+  raceSync.startAt = 0;
+  raceSync.finishRemainSec = 0;
+  raceSync.myReady = false;
+  raceSync.otherReady = false;
+  raceSync.configChangedNotice = false;
+  if (raceSync.countdownTimer) {
+    clearTimeout(raceSync.countdownTimer);
+    raceSync.countdownTimer = null;
+  }
+  const cd = document.querySelector("#raceCountdown");
+  if (cd) cd.style.display = "none";
+  lastGapLabel = "";
+  resetGame();
+  if (resPayload) applyRaceStart(resPayload);
+  carPhysics.x = getAssignedLaneX(raceSync.myLane);
+  player.group.position.x = carPhysics.x + trackCurve(0);
+  if (remoteCar && raceSync.other) {
+    const rx = Number.isFinite(Number(raceSync.other.x)) ? Number(raceSync.other.x) : getAssignedLaneX(-raceSync.myLane);
+    remoteCar.group.position.set(rx + trackCurve(0), 0, 0);
+    remoteCar.group.visible = true;
+  }
+  const rivalEl = document.querySelector("#rivalMarker");
+  if (rivalEl) rivalEl.style.display = "none";
+  document.querySelector("#roomControls")?.classList.add("in-room");
+  title.textContent = "公路漫游 3D";
+  message.textContent = raceSync.isHost
+    ? "已在准备房间！你是房主，可随时修改主题/距离/难度，两人点「准备」后发车。"
+    : "已在准备房间！房主可修改设置，双方点下方「点击准备」即可开局。";
+  setMenuVisible(true);
+  syncHostControlsLock();
+  updateStartButtonForRoom();
+  updateRoomLobbyStatus(customHint);
+}
+
+async function requestRaceRematch(forceLobby = false) {
   if (!roomCode || !roomPlayerId) return;
   try {
-    const res = await api.post("/api/race/rematch", { roomCode, playerId: roomPlayerId });
+    const res = await api.post("/api/race/rematch", {
+      roomCode,
+      playerId: roomPlayerId,
+      forceLobby: Boolean(forceLobby)
+    });
     if (res.waitingOtherFinish) {
       raceSync.rematchQueued = true;
       updateStartButtonForRoom();
       updateRoomLobbyStatus();
       return;
     }
-    raceSync.rematchQueued = false;
-    raceSync.launched = false;
-    raceSync.armed = false;
-    raceSync.locked = false;
-    raceSync.startAt = 0;
-    raceSync.finishRemainSec = 0;
-    raceSync.configChangedNotice = false;
-    lastGapLabel = "";
-    resetGame();
-    applyRaceStart(res);
-    carPhysics.x = getAssignedLaneX(raceSync.myLane);
-    player.group.position.x = carPhysics.x + trackCurve(0);
-    if (remoteCar && raceSync.other) {
-      const rx = Number.isFinite(Number(raceSync.other.x)) ? Number(raceSync.other.x) : getAssignedLaneX(-raceSync.myLane);
-      remoteCar.group.position.set(rx + trackCurve(0), 0, 0);
-      remoteCar.group.visible = true;
-    }
-    const rivalEl = document.querySelector("#rivalMarker");
-    if (rivalEl) rivalEl.style.display = "none";
-    title.textContent = "公路漫游 3D";
-    message.textContent = raceSync.isHost
-      ? "已回到准备房间！你是房主，可随时修改主题/距离/难度，两人点「准备」后发车。"
-      : "已回到准备房间！房主可修改赛道设置，确认后点「准备」即可开始下一局。";
-    setMenuVisible(true);
-    syncHostControlsLock();
-    updateStartButtonForRoom();
-    updateRoomLobbyStatus();
+    if (Number(res.forceLobbyAt) > 0) raceSync.lastForceLobbyAt = Number(res.forceLobbyAt);
+    returnToRoomLobby(res);
   } catch (error) {
+    if (forceLobby) {
+      updateRoomLobbyStatus("已回到准备房间（若房主掉线可点退出房间重开）");
+      return;
+    }
     // 若服务端房间已因长时间无心跳被清理，回退到重新建/进同一房号
     const code = roomCode;
     const wasHost = raceSync.isHost;
@@ -782,6 +814,20 @@ function applyRaceStart(payload) {
     }
     if (prevHost !== raceSync.isHost) syncHostControlsLock();
 
+    // 队友中途点「退出」将全房重开回准备大厅时，仍在跑的端也同步退回双人准备窗口
+    const flAt = Number(payload.forceLobbyAt) || 0;
+    if (raceSync.launched && Number(payload.startAt || 0) === 0 && flAt > raceSync.lastForceLobbyAt) {
+      raceSync.lastForceLobbyAt = flAt;
+      if (running) {
+        returnToRoomLobby(payload, "队友已退出本局，已回到房间等待准备");
+      } else {
+        raceSync.launched = false;
+        raceSync.armed = false;
+        updateStartButtonForRoom();
+        updateRoomLobbyStatus("已退回双人准备房间");
+      }
+      return;
+    }
     if (
       raceSync.launched && !running && raceSync.rematchQueued &&
       (payload.raceOver || Number(payload.startAt || 0) === 0 || Number(payload.playerCount) < 2 || Boolean(payload.players?.[0]?.finished))
@@ -3540,22 +3586,18 @@ function forceEndRace() {
 }
 
 function exitCurrentGame() {
+  if (roomCode && roomPlayerId) {
+    // 联机中点右上角「退出」= 像王者荣耀一样保留房间和好友回到双人准备大厅，不解散/退出房间
+    returnToRoomLobby(null, `房间 ${roomCode} · 已回到双人准备区`);
+    requestRaceRematch(true);
+    return;
+  }
   running = false;
   sound.stopBGM();
   releaseAllInputs();
   baseSpeed = 0;
   currentSpeed = 0;
   boosting = false;
-  const prevRoomCode = roomCode;
-  if (prevRoomCode) {
-    pendingLeavePromise = leaveRaceRoom(false, true).catch(() => {});
-    const input = document.querySelector("#roomCodeInput");
-    if (input && !input.value) input.value = prevRoomCode;
-    const statusEl = document.querySelector("#roomStatus");
-    if (statusEl) {
-      statusEl.textContent = `已暂停退出房间 ${prevRoomCode} · 点「进入」即可从原进度继续`;
-    }
-  }
   const rivalEl = document.querySelector("#rivalMarker");
   if (rivalEl) rivalEl.style.display = "none";
   title.textContent = "公路漫游 3D";

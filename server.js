@@ -119,6 +119,7 @@ function buildRoomSyncPayload(room, viewerId) {
     myReady: Boolean(viewer && viewer.ready),
     otherReady: Boolean(others[0] && others[0].ready),
     startAt: room.startAt || 0,
+    forceLobbyAt: room.forceLobbyAt || 0,
     serverNow: Date.now(),
     finishDistance: room.finishDistance,
     theme: room.theme || "country",
@@ -240,14 +241,15 @@ const server = http.createServer(async (request, response) => {
         const difficulty = validDiffs.has(body.difficulty) ? body.difficulty : "normal";
         const existing = raceRooms.get(roomCode);
         if (!existing) {
-          raceRooms.set(roomCode, { players: new Map(), leftSeats: new Map(), hostId: "", updatedAt: Date.now(), startAt: 0, finishAt: 0, finishDistance, theme, difficulty, configVersion: 1 });
-        } else if (!isRaceDriving(existing)) {
-          // 清理旧局残留或离线座位，复用旧房号创建时房主始终可重新配置并发起新一局
+          raceRooms.set(roomCode, { players: new Map(), leftSeats: new Map(), hostId: "", updatedAt: Date.now(), startAt: 0, finishAt: 0, forceLobbyAt: 0, finishDistance, theme, difficulty, configVersion: 1 });
+        } else if (!isRaceDriving(existing) || activePlayers(existing).length < 2) {
+          // 只要不是两人都正在飙车，点「创建」一律清掉暂停/过期残局，保证立即可见双人准备房间
           for (const [id, p] of existing.players) {
             if (Date.now() - p.updatedAt >= ACTIVE_MS) existing.players.delete(id);
           }
-          if (existing.finishAt > 0 || !isPlayerActive(existing, existing.hostId)) {
+          if (existing.finishAt > 0 || isRaceDriving(existing) || !isPlayerActive(existing, existing.hostId)) {
             resetRoomToLobby(existing);
+            existing.forceLobbyAt = Date.now();
             existing.hostId = "";
           }
         }
@@ -443,7 +445,8 @@ const server = http.createServer(async (request, response) => {
       if (!room || !room.players.has(body.playerId)) return sendJson(response, 404, { error: "联机房间已失效。" });
       const player = room.players.get(body.playerId);
       player.updatedAt = room.updatedAt = Date.now();
-      const waitingOtherFinish = Boolean(
+      const forceLobby = Boolean(body.forceLobby);
+      const waitingOtherFinish = !forceLobby && Boolean(
         room.finishAt &&
         (Date.now() - room.finishAt) <= 10000 &&
         activePlayers(room).some(p => p.id !== player.id && !p.finished)
@@ -451,8 +454,9 @@ const server = http.createServer(async (request, response) => {
       if (waitingOtherFinish) {
         return sendJson(response, 200, { ...buildRoomSyncPayload(room, player.id), waitingOtherFinish: true });
       }
-      if (room.startAt > 0 || room.finishAt > 0) {
+      if (forceLobby || room.startAt > 0 || room.finishAt > 0) {
         resetRoomToLobby(room);
+        if (forceLobby) room.forceLobbyAt = Date.now();
         if (!room.hostId || !isPlayerActive(room, room.hostId)) room.hostId = player.id;
         room.configVersion = (room.configVersion || 1) + 1;
       } else {
