@@ -484,8 +484,11 @@ function serveStatic(urlPath, request, response) {
     return sendJson(response, 403, { error: "Forbidden" });
   }
 
-  fs.readFile(filePath, (error, content) => {
-    if (error) {
+  fs.stat(filePath, (error, stats) => {
+    if (error || !stats.isFile()) {
+      if (path.extname(target)) {
+        return sendJson(response, 404, { error: "Not found" });
+      }
       fs.readFile(path.join(rootDir, "index.html"), (fallbackError, fallback) => {
         if (fallbackError) {
           return sendJson(response, 404, { error: "Not found" });
@@ -495,42 +498,44 @@ function serveStatic(urlPath, request, response) {
       });
       return;
     }
+    const size = stats.size;
     const ext = path.extname(filePath).toLowerCase();
     const contentType = mimeTypes[ext] || "application/octet-stream";
     const cacheControl = ext === ".html" ? "no-cache" : "public, max-age=3600";
     const rangeHeader = request.headers && request.headers.range;
 
-    // 支持 HTTP Range (206 Partial Content)，iOS Safari <audio> 必须依赖它才能播放
-    if (rangeHeader && content.length > 0) {
+    // 支持 HTTP Range (206 Partial Content) 流式传输，iOS Safari <audio> 必须依赖它才能播放
+    if (rangeHeader && size > 0) {
       const match = /^bytes=(\d*)-(\d*)$/.exec(String(rangeHeader).trim());
       if (match) {
         let start = match[1] ? parseInt(match[1], 10) : 0;
-        let end = match[2] ? parseInt(match[2], 10) : content.length - 1;
+        let end = match[2] ? parseInt(match[2], 10) : size - 1;
         if (Number.isNaN(start)) start = 0;
-        if (Number.isNaN(end) || end >= content.length) end = content.length - 1;
-        if (start > end || start >= content.length) {
-          response.writeHead(416, { "Content-Range": `bytes */${content.length}` });
+        if (Number.isNaN(end) || end >= size) end = size - 1;
+        if (start > end || start >= size) {
+          response.writeHead(416, { "Content-Range": `bytes */${size}` });
           return response.end();
         }
-        const chunk = content.subarray(start, end + 1);
         response.writeHead(206, {
           "Content-Type": contentType,
-          "Content-Range": `bytes ${start}-${end}/${content.length}`,
-          "Content-Length": chunk.length,
+          "Content-Range": `bytes ${start}-${end}/${size}`,
+          "Content-Length": end - start + 1,
           "Accept-Ranges": "bytes",
           "Cache-Control": cacheControl
         });
-        return request.method === "HEAD" ? response.end() : response.end(chunk);
+        if (request.method === "HEAD") return response.end();
+        return fs.createReadStream(filePath, { start, end }).pipe(response);
       }
     }
 
     response.writeHead(200, {
       "Content-Type": contentType,
-      "Content-Length": content.length,
+      "Content-Length": size,
       "Accept-Ranges": "bytes",
       "Cache-Control": cacheControl
     });
-    return request.method === "HEAD" ? response.end() : response.end(content);
+    if (request.method === "HEAD") return response.end();
+    return fs.createReadStream(filePath).pipe(response);
   });
 }
 
