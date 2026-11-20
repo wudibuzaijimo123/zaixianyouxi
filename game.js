@@ -871,13 +871,13 @@ function applyRaceStart(payload) {
     if (!running && !raceSync.launched && payload.raceDriving === false && Number(payload.startAt || 0) === 0 && raceSync.resumeState) {
       raceSync.resumeState = null;
     }
-    // 中途退出/刷新后重新点「准备」回归进行中的比赛：无需倒计时，直接从原位置进入！
+    // 中途退出/刷新后重新点「准备」回归进行中的比赛：无需倒计时，直接从原位置进入！（不抢占正在走的 3-2-1 初始倒计时）
     if (
-      !raceSync.launched && !running &&
+      !raceSync.armed && !raceSync.launched && !running &&
       Date.now() >= (raceSync.exitGuardUntil || 0) &&
       (payload.instantResume || (payload.raceDriving && payload.myReady && payload.myInRace))
     ) {
-      launchMultiRace();
+      launchMultiRace(false);
       return;
     }
     if (!raceSync.isHost && nextVer > 0 && raceSync.configVersion > 0 && nextVer !== raceSync.configVersion && !raceSync.launched) {
@@ -966,20 +966,36 @@ function startMultiRaceCountdown() {
       return;
     }
     raceSync.countdownTimer = null;
-    el.style.display = "flex";
-    el.textContent = "GO";
-    launchMultiRace();
-    setTimeout(() => { el.style.display = "none"; }, 700);
+    launchMultiRace(true);
   };
   tick();
 }
 
-function launchMultiRace() {
+function launchMultiRace(showGo = false) {
   if (raceSync.launched) return;
   raceSync.launched = true;
   if (raceSync.countdownTimer) {
     clearTimeout(raceSync.countdownTimer);
     raceSync.countdownTimer = null;
+  }
+  if (raceSync.countdownHideTimer) {
+    clearTimeout(raceSync.countdownHideTimer);
+    raceSync.countdownHideTimer = null;
+  }
+  const cdEl = document.querySelector("#raceCountdown");
+  if (cdEl) {
+    if (showGo) {
+      cdEl.style.display = "flex";
+      cdEl.textContent = "GO";
+      raceSync.countdownHideTimer = setTimeout(() => {
+        cdEl.style.display = "none";
+        cdEl.textContent = "";
+        raceSync.countdownHideTimer = null;
+      }, 650);
+    } else {
+      cdEl.style.display = "none";
+      cdEl.textContent = "";
+    }
   }
   raceSync.locked = false;
   const authoritativeDistance = Number(finishDistance) || 1500;
