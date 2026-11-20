@@ -122,8 +122,10 @@ function buildRoomSyncPayload(room, viewerId) {
     ? Math.round(Number(viewer.distance))
     : 0;
   const finishRemainSec = room.finishAt ? Math.max(0, Math.ceil((10000 - (Date.now() - room.finishAt)) / 1000)) : 0;
+  room._syncSeq = (room._syncSeq || 0) + 1;
   return {
     ok: true,
+    syncSeq: room._syncSeq,
     isHost: Boolean(viewerId && viewerId === room.hostId),
     hostId: room.hostId || "",
     configVersion: room.configVersion || 1,
@@ -296,7 +298,8 @@ const server = http.createServer(async (request, response) => {
         if (!ongoing && resumedSeat.id === room.hostId && !room.startAt) {
           applyHostSettings(room, body);
         }
-        if (ongoing && !resumedSeat.inRace) {
+        if (ongoing) {
+          resumedSeat.inRace = false;
           resumedSeat.ready = false;
           resumedSeat.resumeStartAt = 0;
         }

@@ -400,6 +400,7 @@ async function leaveRaceRoom(silent = false, keepResume = false) {
   raceSync.rematchQueued = false;
   raceSync.configChangedNotice = false;
   raceSync.lastForceLobbyAt = 0;
+  raceSync.lastSyncSeq = 0;
   raceSync.pendingPaused = false;
   raceSync.pendingPausedReason = "";
   if (raceSync.countdownTimer) {
@@ -412,6 +413,8 @@ async function leaveRaceRoom(silent = false, keepResume = false) {
     scene.remove(remoteCar.group);
     remoteCar = null;
   }
+  raceSync.tag = null;
+  raceSync.tagName = "";
   const countdown = document.querySelector("#raceCountdown");
   if (countdown) countdown.style.display = "none";
   document.querySelector("#roomControls")?.classList.remove("in-room");
@@ -466,6 +469,7 @@ const raceSync = {
   configChangedNotice: false,
   lastConfigEditAt: 0,
   lastForceLobbyAt: 0,
+  lastSyncSeq: 0,
   exitGuardUntil: 0
 };
 
@@ -495,6 +499,8 @@ function setRacePaused() {
   raceSync.paused = false;
   const el = document.querySelector("#racePauseBanner");
   if (el) el.style.display = "none";
+  const legacyEl = document.querySelector("#pauseBanner");
+  if (legacyEl) legacyEl.style.display = "none";
 }
 
 function ensureCountdownEl() {
@@ -839,6 +845,11 @@ function cancelPendingRaceCountdown() {
 
 function applyRaceStart(payload) {
   if (payload) {
+    const pktSeq = Number(payload.syncSeq) || 0;
+    if (pktSeq > 0) {
+      if (pktSeq < (raceSync.lastSyncSeq || 0)) return;
+      raceSync.lastSyncSeq = pktSeq;
+    }
     if (Date.now() < (raceSync.exitGuardUntil || 0) && payload.myInRace) return;
     const prevHost = raceSync.isHost;
     const prevDriving = raceSync.raceDriving;
@@ -1187,10 +1198,11 @@ function updateRemoteCar(other) {
       remoteCar.group.position.set(idlePt.x, idlePt.y, idlePt.z);
     }
   }
-  if (!raceSync.tag || raceSync.tagName !== other.name) {
-    if (raceSync.tag) remoteCar.group.remove(raceSync.tag);
-    raceSync.tag = makeNameTag(other.name);
-    raceSync.tagName = other.name;
+  const displayName = String(other.name || "真人对手").trim() || "真人对手";
+  if (!raceSync.tag || raceSync.tagName !== displayName || raceSync.tag.parent !== remoteCar.group) {
+    if (raceSync.tag && raceSync.tag.parent) raceSync.tag.parent.remove(raceSync.tag);
+    raceSync.tag = makeNameTag(displayName);
+    raceSync.tagName = displayName;
     remoteCar.group.add(raceSync.tag);
   }
   refreshGapHud();
@@ -1202,9 +1214,10 @@ let lastGapAt = 0;
 function refreshGapHud() {
   const other = raceSync.other;
   if (!other) return;
+  const rivalLabel = String(other.name || "对手").trim().slice(0, 10) || "对手";
   if (!raceSync.launched) {
     updateRoomLobbyStatus();
-    const readyHint = `${raceSync.myReady ? "你已准备" : "未准备"} / 对手${raceSync.otherReady ? "已准备" : "未准备"}`;
+    const readyHint = `${raceSync.myReady ? "你已准备" : "未准备"} / ${rivalLabel}${raceSync.otherReady ? "已准备" : "未准备"}`;
     setRoomBadge(roomCode, false, readyHint);
     return;
   }
@@ -1218,13 +1231,13 @@ function refreshGapHud() {
     ? ` · 剩 ${raceSync.finishRemainSec}s 结束`
     : "";
   const badgeText = raceSync.launched && !other.inRace
-    ? `我 ${mine}m · 对手准备区 (${theirs}m)`
-    : `我 ${mine}m · 对手 ${theirs}m · ${gapLabel}${countdownSuffix}`;
+    ? `我 ${mine}m · ${rivalLabel}准备区 (${theirs}m)`
+    : `我 ${mine}m · ${rivalLabel} ${theirs}m · ${gapLabel}${countdownSuffix}`;
   if (badgeText === lastGapLabel || now - lastGapAt < 250) return;
   lastGapLabel = badgeText;
   lastGapAt = now;
   const status = document.querySelector("#roomStatus");
-  if (status) status.textContent = `房间 ${roomCode} · 对手：${other.name} · ${badgeText}`;
+  if (status) status.textContent = `房间 ${roomCode} · 真人对手：${rivalLabel} · ${badgeText}`;
   setRoomBadge(roomCode, false, badgeText);
 }
 
@@ -1242,7 +1255,8 @@ function updateRivalMarker(rel, rivalOnRoad = true) {
     return;
   }
   const ahead = rel > 0;
-  const text = ahead ? `▲ 对手领先 ${Math.round(rel)} m` : `▼ 对手落后 ${Math.round(-rel)} m`;
+  const rivalLabel = String(raceSync.other.name || "对手").trim().slice(0, 10) || "对手";
+  const text = ahead ? `▲ 真人·${rivalLabel} 领先 ${Math.round(rel)} m` : `▼ 真人·${rivalLabel} 落后 ${Math.round(-rel)} m`;
   if (text !== lastRivalText) {
     lastRivalText = text;
     el.textContent = text;
@@ -2723,25 +2737,56 @@ function createStreetLamp() {
 // 绝无 F1 大尾翼风刀，圆润流线全景天幕
 // 并且严格以后轴中心为旋转枢轴 (零后轴漂移)
 // ═══════════════════════════════════════
-// 对手车顶名字牌（联机时用来确认对方在线）
+// 对手车顶名字牌（联机真人标识，高对比胶囊底板+昵称，一眼与 AI 车辆区分）
 function makeNameTag(text) {
   const canvas = document.createElement("canvas");
-  canvas.width = 256;
-  canvas.height = 72;
+  canvas.width = 512;
+  canvas.height = 128;
   const ctx = canvas.getContext("2d");
-  ctx.clearRect(0, 0, 256, 72);
-  ctx.font = "bold 36px 'Rajdhani','Orbitron',sans-serif";
+  ctx.clearRect(0, 0, 512, 128);
+  const label = `真人 · ${String(text || "对手").trim().slice(0, 10) || "对手"}`;
+  ctx.font = "900 44px 'Microsoft YaHei','PingFang SC','Rajdhani',sans-serif";
+  const textWidth = ctx.measureText(label).width;
+  const padX = 34;
+  const boxW = Math.min(492, Math.max(220, textWidth + padX * 2));
+  const boxH = 82;
+  const boxX = (512 - boxW) / 2;
+  const boxY = (128 - boxH) / 2;
+  const radius = 41;
+
+  ctx.beginPath();
+  ctx.moveTo(boxX + radius, boxY);
+  ctx.lineTo(boxX + boxW - radius, boxY);
+  ctx.quadraticCurveTo(boxX + boxW, boxY, boxX + boxW, boxY + radius);
+  ctx.lineTo(boxX + boxW, boxY + boxH - radius);
+  ctx.quadraticCurveTo(boxX + boxW, boxY + boxH, boxX + boxW - radius, boxY + boxH);
+  ctx.lineTo(boxX + radius, boxY + boxH);
+  ctx.quadraticCurveTo(boxX, boxY + boxH, boxX, boxY + boxH - radius);
+  ctx.lineTo(boxX, boxY + radius);
+  ctx.quadraticCurveTo(boxX, boxY, boxX + radius, boxY);
+  ctx.closePath();
+
+  ctx.fillStyle = "rgba(6, 16, 30, 0.86)";
+  ctx.fill();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = "#61efff";
+  ctx.stroke();
+
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.shadowColor = "rgba(6,18,31,.9)";
-  ctx.shadowBlur = 10;
-  ctx.fillStyle = "#61efff";
-  ctx.fillText(String(text || "对手").slice(0, 10), 128, 38);
+  ctx.shadowColor = "rgba(0, 0, 0, 0.9)";
+  ctx.shadowBlur = 8;
+  ctx.fillStyle = "#e8fdff";
+  ctx.fillText(label, 256, 66);
+
   const texture = new THREE.CanvasTexture(canvas);
   texture.needsUpdate = true;
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }));
-  sprite.scale.set(4.4, 1.24, 1);
-  sprite.position.set(0, 2.6, -1.2);
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false, depthWrite: false })
+  );
+  sprite.scale.set(6.2, 1.55, 1);
+  sprite.position.set(0, 2.95, -0.6);
+  sprite.renderOrder = 999;
   return sprite;
 }
 
@@ -4173,18 +4218,28 @@ function drawMinimap() {
     ctx.fillStyle = "#48f0ff";
     ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = 1.2;
+    let dotX = rx;
+    let dotY = ry;
     if (dist <= r - 5) {
       ctx.beginPath();
       ctx.arc(rx, ry, 4.2, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
     } else if (dist > 1) {
-      const ex = cx + (dx / dist) * (r - 6);
-      const ey = cy + (dy / dist) * (r - 6);
+      dotX = cx + (dx / dist) * (r - 6);
+      dotY = cy + (dy / dist) * (r - 6);
       ctx.beginPath();
-      ctx.arc(ex, ey, 3.6, 0, Math.PI * 2);
+      ctx.arc(dotX, dotY, 3.6, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
+    }
+    const radarName = String(other.name || "真人").trim().slice(0, 8);
+    if (radarName) {
+      ctx.font = "bold 9px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillStyle = "#e8fdff";
+      ctx.fillText(radarName, dotX, Math.max(12, dotY - 5));
     }
   }
 
