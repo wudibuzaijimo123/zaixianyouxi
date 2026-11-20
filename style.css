@@ -751,10 +751,11 @@ p {
   .controls #right { left: calc(16px + 104px); }
   .controls .boost {
     position: fixed;
-    right: calc(16px + 118px);
-    bottom: calc(42px + env(safe-area-inset-bottom));
-    width: 84px;
-    height: 84px;
+    left: 16px;
+    right: auto;
+    bottom: calc(142px + env(safe-area-inset-bottom));
+    width: 78px;
+    height: 78px;
     pointer-events: auto;
   }
   .pedal-controls {
