@@ -225,6 +225,7 @@ async function enterRaceRoom(rawCode, mode = "join") {
   if (input) input.value = roomCode;
   document.querySelector("#roomControls")?.classList.add("in-room");
   setRoomBadge(roomCode);
+  updateStartButtonForRoom();
   const lengthSelect = document.querySelector("#raceLength");
   if (lengthSelect) {
     lengthSelect.disabled = mode !== "create";
@@ -281,6 +282,7 @@ async function leaveRaceRoom(silent = false) {
     lengthSelect.title = "";
   }
   setRoomBadge("");
+  updateStartButtonForRoom();
   if (!silent) {
     document.querySelector("#roomStatus").textContent = "已退出房间，输入房间号可以重新进入";
     running = false;
@@ -304,6 +306,27 @@ function ensureCountdownEl() {
   return el;
 }
 
+function updateStartButtonForRoom() {
+  const btn = document.querySelector("#start");
+  if (!btn) return;
+  if (!roomCode) {
+    btn.disabled = false;
+    if (btn.textContent.includes("等待对手") || btn.textContent.includes("倒计时")) {
+      btn.textContent = "启动出发";
+    }
+    return;
+  }
+  if (!raceSync.armed) {
+    btn.disabled = true;
+    btn.textContent = "等待第 2 位车手加入…";
+  } else if (!raceSync.launched) {
+    btn.disabled = true;
+    btn.textContent = "两人已就位，倒计时发车…";
+  } else {
+    btn.disabled = false;
+  }
+}
+
 function cancelPendingRaceCountdown() {
   if (raceSync.launched) return;
   const wasPending = raceSync.armed || Boolean(raceSync.countdownTimer);
@@ -321,6 +344,7 @@ function cancelPendingRaceCountdown() {
     const status = document.querySelector("#roomStatus");
     if (status) status.textContent = `房间 ${roomCode} · 等待两位车手都在房间内，再开始倒计时`;
   }
+  updateStartButtonForRoom();
 }
 
 function applyRaceStart(payload) {
@@ -344,6 +368,7 @@ function applyRaceStart(payload) {
     const sel = document.querySelector("#raceLength");
     if (sel) sel.value = String(finishDistance);
   }
+  updateStartButtonForRoom();
   startMultiRaceCountdown();
 }
 
@@ -402,6 +427,7 @@ function launchMultiRace() {
   raceSync.renderOffsetX = 0;
   running = true;
   setMenuVisible(false);
+  updateStartButtonForRoom();
   document.querySelector("#roomStatus").textContent = "发车！";
   sound.startBGM();
   triggerHaptic([40, 60, 120]);
@@ -1888,6 +1914,17 @@ function resetGame() {
 }
 
 function startGame() {
+  if (roomCode && raceSync.launched && !running) {
+    // 上一局联机已结束：重新进房等待两位车手再次到齐后统一倒计时发车
+    const code = roomCode;
+    leaveRaceRoom(true)
+      .then(() => enterRaceRoom(code, "create"))
+      .catch(error => {
+        const status = document.querySelector("#roomStatus");
+        if (status) status.textContent = error.message || "重新进房失败";
+      });
+    return;
+  }
   if (roomCode && raceSync.armed && !running && Date.now() >= raceSync.startAt) {
     launchMultiRace();
     return;
@@ -1895,6 +1932,7 @@ function startGame() {
   // 联机中：两人没到齐就不许先跑，必须一起发车
   if (roomCode && !raceSync.armed) {
     document.querySelector("#roomStatus").textContent = "等对手进入同一个房间号后，两人一起发车";
+    updateStartButtonForRoom();
     return;
   }
   // 联机倒计时未结束前，手动开始无效，等统一发车
@@ -1902,6 +1940,7 @@ function startGame() {
   sound.ensureContext();
   running = true;
   setMenuVisible(false);
+  updateStartButtonForRoom();
 
   playerName = playerNameInput.value.trim() || "自驾游车友";
   localStorage.setItem("neonRacerName", playerName);
