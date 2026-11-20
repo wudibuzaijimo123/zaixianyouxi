@@ -410,7 +410,7 @@ const server = http.createServer(async (request, response) => {
         player.ready = true;
         player.resumeStartAt = 0;
       }
-      if (typeof body.finished === "boolean") {
+      if (typeof body.finished === "boolean" && room.startAt > 0 && Date.now() >= room.startAt) {
         player.finished = body.finished;
         if (body.finished && !room.finishAt) room.finishAt = Date.now();
         if (body.finished && !player.finishTime) {
@@ -504,14 +504,14 @@ const server = http.createServer(async (request, response) => {
       const waitingOtherFinish = !forceLobby && Boolean(
         room.finishAt &&
         (Date.now() - room.finishAt) <= 10000 &&
-        activePlayers(room).some(p => p.id !== player.id && !p.finished)
+        activePlayers(room).some(p => p.id !== player.id && p.inRace && !p.finished)
       );
       if (waitingOtherFinish) {
         return sendJson(response, 200, { ...buildRoomSyncPayload(room, player.id), waitingOtherFinish: true });
       }
       if (forceLobby || room.startAt > 0 || room.finishAt > 0) {
         resetRoomToLobby(room);
-        if (forceLobby) room.forceLobbyAt = Date.now();
+        room.forceLobbyAt = Date.now();
         if (!room.hostId || !isPlayerActive(room, room.hostId)) room.hostId = player.id;
         room.configVersion = (room.configVersion || 1) + 1;
       } else {

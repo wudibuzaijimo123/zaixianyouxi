@@ -904,19 +904,11 @@ function applyRaceStart(payload) {
     }
     if (prevHost !== raceSync.isHost || prevDriving !== raceSync.raceDriving) syncHostControlsLock();
 
-    // 所有车手均已退回大厅（或房主强制全房重开）时，同步重置回双人准备窗口
+    // 本局结束重开或所有车手退回大厅时，双端同步干净重置回双人准备窗口（重置里程避免误上报 finished）
     const flAt = Number(payload.forceLobbyAt) || 0;
     if (raceSync.launched && Number(payload.startAt || 0) === 0 && flAt > raceSync.lastForceLobbyAt) {
       raceSync.lastForceLobbyAt = flAt;
-      if (running) {
-        returnToRoomLobby(payload, "本局已结束，已回到双人准备房间");
-      } else {
-        raceSync.launched = false;
-        raceSync.armed = false;
-        raceSync.resumeState = null;
-        updateStartButtonForRoom();
-        updateRoomLobbyStatus("已退回双人准备房间");
-      }
+      returnToRoomLobby(payload, "已回到双人准备房间，双方点「准备」即可开启下一局");
       return;
     }
     if (
@@ -1075,7 +1067,7 @@ async function syncRaceRoom() {
       heading: snap ? (snap.heading || 0) : carPhysics.heading,
       speed: snap ? (snap.speed || 0) : currentSpeed,
       distance: snap ? (snap.distance || 0) : raceDistance,
-      finished: !running && raceDistance >= finishDistance,
+      finished: Boolean(raceSync.launched && !running && raceDistance >= finishDistance),
       time: snap ? (snap.time || 0) : raceTime,
       score: Math.floor(snap ? (snap.score || 0) : score),
       nitro: snap ? (snap.nitro ?? 100) : nitro,
@@ -4016,7 +4008,12 @@ function finishRace() {
       finished: true, time: raceTime
     }).catch(() => {});
   }
-  document.querySelector("#start").textContent = "再跑一圈";
+  const startBtnEnd = document.querySelector("#start");
+  if (startBtnEnd) {
+    startBtnEnd.disabled = false;
+    startBtnEnd.classList.remove("is-ready", "ready-prompt");
+    startBtnEnd.textContent = "再跑一圈";
+  }
   setMenuVisible(true);
 }
 
@@ -4040,7 +4037,12 @@ function forceEndRace() {
     lines.splice(1, 0, `对手用时 ${formatRaceTime(other.finishTime)}　冲线 ${other.finishSpeed || 0} km/h`);
   }
   message.innerHTML = lines.join("<br>");
-  document.querySelector("#start").textContent = "再来一局";
+  const startBtnEnd = document.querySelector("#start");
+  if (startBtnEnd) {
+    startBtnEnd.disabled = false;
+    startBtnEnd.classList.remove("is-ready", "ready-prompt");
+    startBtnEnd.textContent = "再来一局";
+  }
   setMenuVisible(true);
   setRoomBadge(roomCode, false, "比赛结束");
 }
