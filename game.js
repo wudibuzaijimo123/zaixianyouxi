@@ -493,30 +493,11 @@ function ensurePauseBannerEl() {
   return el;
 }
 
-function setRacePaused(paused, reason = "") {
-  const next = Boolean(paused && roomCode && raceSync.launched && running);
-  const wasPaused = raceSync.paused;
-  raceSync.paused = next;
-  const el = ensurePauseBannerEl();
-  if (next) {
-    el.textContent = `⏸ ${reason || "对手已暂时离开，比赛已暂停，等待对方重进房间继续…"}`;
-    el.style.display = "block";
-    sound.updateEngine(0, false);
-    document.body.classList.remove("boosting-fx");
-    if (speedEl) speedEl.textContent = "暂停";
-  } else {
-    el.style.display = "none";
-    if (wasPaused) {
-      lastTrafficAt = Date.now();
-      if (speedEl) speedEl.textContent = String(Math.floor(currentSpeed * 90));
-      if (impactHud && impactValue) {
-        impactValue.textContent = "▶ 对手已归队 · 继续比赛";
-        impactHud.classList.add("visible");
-        clearTimeout(impactTimer);
-        impactTimer = setTimeout(() => impactHud.classList.remove("visible"), 1400);
-      }
-    }
-  }
+let rivalOfflineNoticed = false;
+function setRacePaused() {
+  raceSync.paused = false;
+  const el = document.querySelector("#racePauseBanner");
+  if (el) el.style.display = "none";
 }
 
 function ensureCountdownEl() {
@@ -1029,6 +1010,18 @@ async function syncRaceRoom() {
     if (!other) {
       raceSync.other = null;
       raceSync.remoteId = "";
+      if (remoteCar) remoteCar.group.visible = false;
+      const rivalEl = document.querySelector("#rivalMarker");
+      if (rivalEl) rivalEl.style.display = "none";
+      if (running && raceSync.launched && !rivalOfflineNoticed) {
+        rivalOfflineNoticed = true;
+        if (impactHud && impactValue) {
+          impactValue.textContent = "对手暂离 · 可继续飞驰";
+          impactHud.classList.add("visible");
+          clearTimeout(impactTimer);
+          impactTimer = setTimeout(() => impactHud.classList.remove("visible"), 1600);
+        }
+      }
       if (raceSync.locked) {                 // 对手跑了就别把玩家冻在倒计时里
         raceSync.locked = false;
         raceSync.armed = false;
@@ -1101,6 +1094,15 @@ function updateRemoteCar(other) {
   raceSync.remoteName = other.name;
 
   const rivalColor = resolveDistinctRivalColor(raceSync.myColor, other.color);
+  if (running && raceSync.launched && rivalOfflineNoticed) {
+    rivalOfflineNoticed = false;
+    if (impactHud && impactValue) {
+      impactValue.textContent = `▶ ${other.name || "对手"} 已重进赛道`;
+      impactHud.classList.add("visible");
+      clearTimeout(impactTimer);
+      impactTimer = setTimeout(() => impactHud.classList.remove("visible"), 1400);
+    }
+  }
   if (!remoteCar) {
     // 对手与己方始终使用高对比度撞色，并直接放到对手所在车道上，开局即可看见不同车道
     remoteCar = createTeslaCar(false, rivalColor);
@@ -1108,8 +1110,10 @@ function updateRemoteCar(other) {
     const initX = Number.isFinite(Number(other.x)) ? Number(other.x) : 0;
     const initPt = trackWorldPoint(initDist, initX, 0);
     remoteCar.group.position.set(initPt.x, initPt.y, initPt.z);
+    remoteCar.group.visible = true;
     scene.add(remoteCar.group);
   } else {
+    remoteCar.group.visible = true;
     if (remoteCar.group.userData.paintMaterial) {
       remoteCar.group.userData.paintMaterial.color.set(rivalColor);
     }
@@ -1194,9 +1198,9 @@ function syncRemoteCarVisual() {
   const projected = o.distance + (o.speed * 90 / 3.6) * elapsed;
   const rel = projected - raceDistance;             // 真实差距：正数=对手领先，负数=己方领先
   const pt = trackWorldPoint(projected, o.x, 0);
-  remoteCar.group.position.z += (pt.z - remoteCar.group.position.z) * 0.45;
-  remoteCar.group.position.x += (pt.x - remoteCar.group.position.x) * 0.45;
-  remoteCar.group.position.y += (pt.y - remoteCar.group.position.y) * 0.45;
+  remoteCar.group.position.z += (pt.z - remoteCar.group.position.z) * 0.58;
+  remoteCar.group.position.x += (pt.x - remoteCar.group.position.x) * 0.58;
+  remoteCar.group.position.y += (pt.y - remoteCar.group.position.y) * 0.58;
   remoteCar.group.rotation.y = -o.heading + pt.yaw;
   remoteCar.group.rotation.z = pt.bankAngle;
   remoteCar.wheels.forEach(w => {
@@ -1232,7 +1236,13 @@ function startRaceStream() {
       setRacePaused(Boolean(data.paused), data.pausedReason || "");
       if (data.raceOver) forceEndRace();
       const other = (data.players || [])[0];
-      if (other) updateRemoteCar(other);
+      if (other) {
+        updateRemoteCar(other);
+      } else {
+        raceSync.other = null;
+        raceSync.remoteId = "";
+        if (remoteCar) remoteCar.group.visible = false;
+      }
     };
     raceStream.onerror = () => {
       // SSE 断了就关掉，交给轮询 + 自动重连兜底
@@ -3313,6 +3323,8 @@ function createTrackRibbon(profile, material, vScale, uCoords, opts = {}) {
   const rows = slices + 1;
   const cols = profile.length;
   const positions = new Float32Array(rows * cols * 3);
+  const normals = new Float32Array(rows * cols * 3);
+  for (let i = 0; i < rows * cols; i++) normals[i * 3 + 1] = 1;
   const uvs = new Float32Array(rows * cols * 2);
   const indices = [];
   for (let s = 0; s < slices; s++) {
@@ -3326,6 +3338,7 @@ function createTrackRibbon(profile, material, vScale, uCoords, opts = {}) {
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
   geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
   geo.setIndex(indices);
   const mesh = new THREE.Mesh(geo, material);

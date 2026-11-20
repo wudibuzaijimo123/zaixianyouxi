@@ -140,23 +140,9 @@ function saveLeftSeat(room, player) {
   room.leftSeats.set(`name:${String(player.name || "").trim().toLowerCase()}`, snap);
 }
 
-function roomPauseInfo(room) {
-  const ongoing = Boolean(room && room.startAt && Date.now() >= room.startAt && !room.finishAt);
-  if (!ongoing) return { paused: false, pausedReason: "" };
-  const actives = activePlayers(room);
-  if (actives.length >= 2) return { paused: false, pausedReason: "" };
-  const absentNames = [];
-  for (const p of room.players.values()) {
-    if (Date.now() - p.updatedAt >= ACTIVE_MS) absentNames.push(p.name || "对手");
-  }
-  for (const seat of (room.leftSeats || new Map()).values()) {
-    if (seat && seat.name && !absentNames.includes(seat.name)) absentNames.push(seat.name);
-  }
-  const who = absentNames[0] || "对手";
-  return {
-    paused: true,
-    pausedReason: actives.length === 0 ? "等待两位车手重进房间继续…" : `等待 ${who} 重进房间继续比赛…`
-  };
+function roomPauseInfo() {
+  // 对手暂离不暂停正在比赛的车手；其进度保留在 leftSeats，随时重进即可从原位继续
+  return { paused: false, pausedReason: "" };
 }
 
 const mimeTypes = {
@@ -242,8 +228,8 @@ const server = http.createServer(async (request, response) => {
         const existing = raceRooms.get(roomCode);
         if (!existing) {
           raceRooms.set(roomCode, { players: new Map(), leftSeats: new Map(), hostId: "", updatedAt: Date.now(), startAt: 0, finishAt: 0, forceLobbyAt: 0, finishDistance, theme, difficulty, configVersion: 1 });
-        } else if (!isRaceDriving(existing) || activePlayers(existing).length < 2) {
-          // 只要不是两人都正在飙车，点「创建」一律清掉暂停/过期残局，保证立即可见双人准备房间
+        } else if (!isRaceDriving(existing) || activePlayers(existing).length === 0) {
+          // 只要房间未在行驶或场内已无人，点「创建」清掉残局；若仍有队友在跑则保留赛局以便断点续跑
           for (const [id, p] of existing.players) {
             if (Date.now() - p.updatedAt >= ACTIVE_MS) existing.players.delete(id);
           }
