@@ -94,7 +94,7 @@ function scheduleRaceStart(room) {
     player.ready = true;
     player.updatedAt = now;
   }
-  room.startAt = now + 4000;
+  room.startAt = now + 3000;
 }
 
 function maybeStartCountdown(room) {

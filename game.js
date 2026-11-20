@@ -226,8 +226,8 @@ function enterRaceRoom(rawCode, mode = "join") {
 
 async function enterRaceRoomSerial(rawCode, mode = "join") {
   const code = String(rawCode || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
-  if (code.length < 3) {
-    document.querySelector("#roomStatus").textContent = "先输入房间号（至少 3 位），两人输一样的号就能进同一个房间";
+  if (mode !== "create" && code.length < 3) {
+    document.querySelector("#roomStatus").textContent = "先输入房间号（3~8 位），或直接点「创建」自动建房";
     return;
   }
   if (pendingLeavePromise) {
@@ -403,6 +403,7 @@ async function leaveRaceRoom(silent = false, keepResume = false) {
   }
   raceSync.isHost = false;
   syncHostControlsLock();
+  renderRoomSlots();
   setRoomBadge("");
   updateStartButtonForRoom();
   if (!silent) {
@@ -531,40 +532,66 @@ function syncHostControlsLock() {
   }
 }
 
+function renderRoomSlots() {
+  const box = document.querySelector("#roomSlots");
+  if (!box) return;
+  if (!roomCode) {
+    box.innerHTML = "";
+    return;
+  }
+  const myName = escapeHtml(playerNameInput?.value.trim() || "我");
+  const hasOther = Number(raceSync.playerCount) >= 2 && Boolean(raceSync.other);
+  const otherName = escapeHtml(raceSync.other?.name || raceSync.remoteName || "好友");
+  const myCard = {
+    role: raceSync.isHost ? "👑 房主（左道）" : "车手（右道）",
+    name: `${myName}（我）`,
+    ready: Boolean(raceSync.myReady),
+    empty: false,
+    lane: raceSync.myLane
+  };
+  const otherCard = {
+    role: raceSync.isHost ? "好友（右道）" : "👑 房主（左道）",
+    name: hasOther ? otherName : "等待好友输入房号…",
+    ready: Boolean(raceSync.otherReady),
+    empty: !hasOther,
+    lane: -raceSync.myLane
+  };
+  const ordered = myCard.lane <= 0 ? [myCard, otherCard] : [otherCard, myCard];
+  box.innerHTML = ordered.map(s => {
+    const cls = s.empty ? "slot-card empty" : (s.ready ? "slot-card ready" : "slot-card");
+    const badge = s.empty ? "等待加入" : (s.ready ? "✓ 已准备" : "未准备");
+    return `<div class="${cls}"><div class="slot-role">${s.role}</div><div class="slot-name">${s.name}</div><span class="slot-badge">${badge}</span></div>`;
+  }).join("");
+}
+
 function updateRoomLobbyStatus(overrideText = "") {
   if (!roomCode || running || raceSync.armed) return;
+  renderRoomSlots();
   const status = document.querySelector("#roomStatus");
   if (!status) return;
   if (overrideText) {
     status.textContent = overrideText;
     return;
   }
-  const laneLabel = raceSync.myLane < 0 ? "左侧车道" : "右侧车道";
   const count = Number(raceSync.playerCount) || 1;
-  const otherName = raceSync.remoteName || "对手";
-  const cfgChanged = raceSync.configChangedNotice ? "房主改了配置，请确认后重点准备 · " : "";
   if (raceSync.launched) {
     status.textContent = raceSync.rematchQueued
-      ? `房间 ${roomCode} · 等待对手完成冲线后自动回到准备区…`
-      : `房间 ${roomCode} · 本局结束，点下方「再跑一圈 / 再来一局」回准备区`;
+      ? `房间 ${roomCode} · 等待好友冲线后回准备区…`
+      : `房间 ${roomCode} · 点下方回到准备区`;
     return;
   }
   if (count < 2) {
-    status.textContent = raceSync.isHost
-      ? `房间 ${roomCode}（你是房主·${laneLabel}）· ${raceSync.myReady ? "你已准备 · 等对手加入" : "可随时改主题/距离/难度 · 等对手加入并点准备"}`
-      : `已加入 ${roomCode}（${laneLabel}）· ${raceSync.myReady ? "你已准备 · 等房主回房" : "等待房主加入…"}`;
+    status.textContent = `房号 ${roomCode} · 让好友输此号点「进入」，两人都点「准备」开局`;
     return;
   }
   if (raceSync.myReady && raceSync.otherReady) {
-    status.textContent = `房间 ${roomCode} · 双方已准备！正在进入发车倒计时…`;
-  } else if (raceSync.myReady) {
-    status.textContent = `房间 ${roomCode}（${laneLabel}）· 你已准备，等待 ${otherName} 点「准备」`;
-  } else if (raceSync.otherReady) {
-    status.textContent = `房间 ${roomCode}（${laneLabel}）· ${otherName} 已准备！确认当前设置后点下方准备立即发车`;
-  } else if (raceSync.isHost) {
-    status.textContent = `房间 ${roomCode}（你是房主·${laneLabel}）· 改完设置后请与 ${otherName} 各自点「准备」`;
+    status.textContent = `房号 ${roomCode} · 双方已准备，3 秒后发车！`;
+  } else if (raceSync.configChangedNotice && !raceSync.isHost) {
+    status.textContent = `房号 ${roomCode} · 房主改了设置，请确认后点「准备」`;
   } else {
-    status.textContent = `已加入 ${roomCode}（${laneLabel}）· ${cfgChanged}房主 ${otherName} 可改设置，确认后点下方「点击准备」`;
+    status.textContent = raceSync.isHost
+      ? `房号 ${roomCode} · 房主可改赛道/距离/难度，两人点下方准备即开局`
+      : `房号 ${roomCode} · 一切设置由房主决定，点下方「点击准备」`;
   }
 }
 
@@ -577,6 +604,7 @@ function updateStartButtonForRoom() {
     if (
       btn.textContent.includes("准备") ||
       btn.textContent.includes("等待") ||
+      btn.textContent.includes("发车") ||
       btn.textContent.includes("倒计时") ||
       btn.textContent.includes("再跑")
     ) {
@@ -586,26 +614,24 @@ function updateStartButtonForRoom() {
   }
   if (raceSync.launched && !running) {
     btn.disabled = raceSync.rematchQueued;
-    if (raceSync.rematchQueued) btn.textContent = "等待对手完成本局…";
+    if (raceSync.rematchQueued) btn.textContent = "等待好友完成本局…";
     return;
   }
   if (raceSync.armed && !raceSync.launched) {
     btn.disabled = true;
-    btn.textContent = "双方已准备，倒计时发车…";
+    btn.textContent = "3 秒后同时发车…";
     return;
   }
   btn.disabled = false;
   const count = Number(raceSync.playerCount) || 1;
   if (raceSync.myReady) {
     btn.classList.add("is-ready");
-    btn.textContent = count < 2
-      ? "✓ 已准备（等对手加入 · 再点取消）"
-      : "✓ 已准备（等对手点准备 · 再点取消）";
+    btn.textContent = "✓ 已准备（再点取消）";
   } else if (count >= 2 && raceSync.otherReady) {
     btn.classList.add("ready-prompt");
-    btn.textContent = "对手已准备 · 点我准备立即发车！";
+    btn.textContent = "点击准备 · 立刻开局！";
   } else {
-    btn.textContent = raceSync.isHost ? "确定配置 · 点击准备" : "点击准备";
+    btn.textContent = "点击准备";
   }
 }
 
@@ -619,19 +645,34 @@ function notifyHostConfigChanged() {
   syncRaceRoom();
 }
 
+let readyReqInFlight = false;
 async function toggleRaceReady(nextReady) {
-  if (!roomCode || !roomPlayerId || raceSync.armed || raceSync.launched) return;
+  if (!roomCode || !roomPlayerId || raceSync.armed || raceSync.launched || readyReqInFlight) return;
+  const prevReady = raceSync.myReady;
+  readyReqInFlight = true;
+  // 立即响应点击（类似王者荣耀点准备即变绿），再与服务端校验同步
+  raceSync.lastConfigEditAt = Date.now();
+  raceSync.myReady = Boolean(nextReady);
+  raceSync.configChangedNotice = false;
+  updateStartButtonForRoom();
+  updateRoomLobbyStatus();
   try {
     const res = await api.post("/api/race/ready", {
       roomCode,
       playerId: roomPlayerId,
       ready: Boolean(nextReady)
     });
-    raceSync.configChangedNotice = false;
+    raceSync.lastConfigEditAt = 0;
     applyRaceStart(res);
   } catch (error) {
+    raceSync.lastConfigEditAt = 0;
+    raceSync.myReady = prevReady;
+    updateStartButtonForRoom();
+    updateRoomLobbyStatus();
     const status = document.querySelector("#roomStatus");
-    if (status) status.textContent = error.message || "切换准备状态失败，请重试";
+    if (status) status.textContent = error.message || "切换准备失败，请重试";
+  } finally {
+    readyReqInFlight = false;
   }
 }
 
@@ -3404,7 +3445,7 @@ function startGame() {
   if (!roomCode && typedRoom.length >= 3) {
     const status = document.querySelector("#roomStatus");
     if (status) {
-      status.textContent = `⚠️ 已填房号 ${typedRoom}，请先点「创建」或「进入」并在双方都点「准备」后再进游戏（单人玩请清空房号）`;
+      status.textContent = `⚠️ 房号 ${typedRoom} 还没进房：请先点「创建」或「进入」（单人玩请先清空房号）`;
     }
     return;
   }
@@ -4580,5 +4621,7 @@ if (pendingSavedRoom) {
   if (inputEl) inputEl.value = pendingSavedRoom.roomCode;
   enterRaceRoom(pendingSavedRoom.roomCode, pendingSavedRoom.isHost ? "create" : "join").catch(() => {
     clearActiveRoom();
+    const statusEl = document.querySelector("#roomStatus");
+    if (statusEl) statusEl.textContent = `房间 ${pendingSavedRoom.roomCode} 已结束，房主点「创建」或清空房号单人玩`;
   });
 }
