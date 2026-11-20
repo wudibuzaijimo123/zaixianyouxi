@@ -1,10 +1,127 @@
-# 在线版 · PlayCarGame（3D 公路自驾 · 双人联机比赛）
+# 在线版 · PlayCarGame（3D 公路竞速 · 双人联机）
 
-线上地址：<https://api.game.yhj123.dpdns.org/>
+线上体验：<https://api.game.yhj123.dpdns.org/>  
+GitHub（在线联机版）：<https://github.com/wudibuzaijimo123/zaixianyouxi>
 
-## 🚦 快速调整车流刷新频率（先看这里）
+纯原生 **Node.js + Three.js** 实现，零第三方 npm 依赖（无需 `npm install`），下载后一条命令即可在本地 `localhost` 运行或部署到自己的云服务器上与朋友联机。
 
-打开 [`game.js`](game.js)，修改这些参数：
+---
+
+## 🚀 一、本地运行（Localhost）
+
+> 只需安装 **Node.js >= 18**，无需安装任何额外依赖包。
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/wudibuzaijimo123/zaixianyouxi.git
+cd zaixianyouxi
+
+# 2. 启动服务端与前端（默认 3000 端口）
+node server.js
+# 或使用 npm start
+```
+
+打开浏览器访问：<http://localhost:3000/>
+
+- **指定自定义端口**（例如 `3210`）：
+  - **Linux / macOS**：`PORT=3210 node server.js` → 访问 `http://localhost:3210/`
+  - **Windows PowerShell**：`$env:PORT=3210; node server.js` → 访问 `http://localhost:3210/`
+- **局域网双人联机测试**：在同一 Wi-Fi 下，电脑运行 `node server.js`，手机浏览器访问 `http://<你电脑的局域网IP>:3000/` 即可双设备实时开房间联机！
+
+---
+
+## ☁️ 二、在自己的 Linux 服务器部署上线
+
+下面以常见的 **Ubuntu / Debian / CentOS** 云服务器（Node.js >= 18 + Nginx）为例：
+
+### 1. 准备环境并拉取代码
+
+```bash
+# 以 root 或 sudo 权限执行
+mkdir -p /opt
+cd /opt
+git clone https://github.com/wudibuzaijimo123/zaixianyouxi.git playcargame
+cd /opt/playcargame
+mkdir -p data
+```
+
+先测试能否直接跑通：
+
+```bash
+PORT=3210 node /opt/playcargame/server.js
+# 新开终端检查：curl http://127.0.0.1:3210/api/health
+```
+
+### 2. 配置开机自启（systemd 守护进程）
+
+可直接复用仓库内置的 [`deploy/systemd/playcargame.service`](deploy/systemd/playcargame.service)：
+
+```bash
+cp /opt/playcargame/deploy/systemd/playcargame.service /etc/systemd/system/playcargame.service
+systemctl daemon-reload
+systemctl enable --now playcargame
+systemctl status playcargame
+```
+
+验证服务监听：`curl -fsS http://127.0.0.1:3210/api/health` 返回 `{"ok":true,...}` 即表示后端运行正常。
+
+> 如果习惯用 `pm2`：也可以直接执行 `PORT=3210 pm2 start /opt/playcargame/server.js --name playcargame && pm2 save`。
+
+### 3. 配置 Nginx 反向代理（含 SSE 实时推送支持）
+
+新建 `/etc/nginx/conf.d/playcargame.conf`（把 `your-domain.com` 换成你的域名，若无域名可用服务器公网 IP 并删除 `server_name` 限制或改用独立端口）：
+
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:3210;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 关键：关闭缓冲保证 /api/race/stream (SSE) 双人位置毫秒级实时推送
+        proxy_buffering off;
+        proxy_read_timeout 75s;
+        proxy_send_timeout 75s;
+    }
+}
+```
+
+检查并重载 Nginx：
+
+```bash
+nginx -t && systemctl reload nginx
+```
+
+> - 前后端通过同一个 Node 服务同源托管（前端会优先请求当前域名的 `/api/*`），部署在任何自己的域名或 IP 下**无需修改前端代码**。
+> - 如需开启 HTTPS，可安装 Certbot 后运行 `certbot --nginx -d your-domain.com`；云服务器安全组请放行 `80` / `443` 端口。
+> - 如果不想用 Nginx 仅个人临时联机测试，也可以直接放行服务器 `3210` 端口，浏览器访问 `http://<服务器IP>:3210/`（部分浏览器限制 HTTP 下的手机倾斜传感器权限，正式游玩建议上 HTTPS）。
+
+---
+
+## 🎮 三、玩法与双人联机规则
+
+1. **双人房间（《王者荣耀》开黑房流程）**：
+   - **房主**：输入任意 3~8 位房号（或留空直接点）点 **「创建」**，进入双人席位房间，固定分列**左侧车道**。发车前房主可随时自由修改 **赛道主题 / 比赛距离 / 车流难度**（修改后会自动重置准备状态以便双方重新确认）。
+   - **好友**：输入相同房号点 **「进入」**，自动分列**右侧车道**并锁定同步房主设置。
+   - **准备发车**：两人在卡片区确认设置后都点下 **「点击准备」**，席位变绿即开启 **3 秒倒计时**同时出发。
+   - **对局退出 / 再来一局**：中途点右上角「退出」会保留当前房间与两人席位回到准备区（需彻底退房点「退出房间」）；完赛后点「再跑一圈 / 再来一局」同样保留房号与房主配置回到准备区。
+2. **赛程与赛道**：
+   - 支持 **3 km / 5 km（默认）/ 8 km / 12 km** 赛程；每 2400 m 为一圈复合多弯山路与环形发卡弯（`trackCurve`），配备左上角 CS:GO 风格圆形战术雷达。
+3. **驾驶与胜负判定**：
+   - 最高时速 `200 km/h`，带加速抬头/刹车点头纵倾、真实渐进刹车减速度与氮气加速；手机支持左下角双键或顶栏「倾斜转向」+ 碰撞震动反馈。
+   - 率先冲线者获胜；一方冲线后开启 **10 秒**倒计时窗口，10 秒内对手未冲线则结束比赛并对比成绩。
+
+---
+
+## 🚦 四、快速调整车流密度
+
+打开 [`game.js`](game.js)，修改顶部常量即可调整刷车手感：
 
 ```js
 const TRAFFIC_REFERENCE_SPEED_KMH = 200;
@@ -14,99 +131,31 @@ const TRAFFIC_MAX_ACTIVE = 32;
 const TRAFFIC_DOUBLE_WAVE_RATIO = 0.3;
 ```
 
-- `TRAFFIC_IDLE_INTERVAL_MS`：低速端的刷新间隔。改小会让低速和中速时刷得更频繁；例如 `1450` 改成 `1300`，静止时从约 1.45 秒缩短到 1.3 秒。
-- `TRAFFIC_FAST_INTERVAL_MS`：达到参考车速时的刷新间隔。改小会让高速时刷得更频繁；当前为 950 ms，达到 200 km/h 时约 0.95 秒一波。
-- `TRAFFIC_REFERENCE_SPEED_KMH`：高速间隔对应的车速。当前为 200 km/h；达到或超过它后使用 `TRAFFIC_FAST_INTERVAL_MS`。
-- `TRAFFIC_MAX_ACTIVE`：手机和电脑共用的场上车辆上限，当前都是 32 辆。
-- `TRAFFIC_DOUBLE_WAVE_RATIO`：车速累计到 1 后刷双车的频率。当前为 `0.3`，200 km/h 时约每 3.3 波有一波双车；高速平均约 1.37 辆/秒，比 0.62 秒单车一波的设置少约 15%。改小会让双车波次更少。
+- `TRAFFIC_IDLE_INTERVAL_MS` / `TRAFFIC_FAST_INTERVAL_MS`：静止与高速时的刷车波次间隔（ms）。
+- `TRAFFIC_MAX_ACTIVE`：场上同屏 AI 车辆上限（手机与电脑共用）。
+- `TRAFFIC_DOUBLE_WAVE_RATIO`：单波双车并排出现概率（3 车道始终至少留有通车空隙）。
 
-计算逻辑在 `update()` 中：车速越快，`trafficSpeedRatio` 越接近 1，算出的 `trafficInterval` 越小；当经过时间超过间隔时，`if` 条件调用 `spawnTraffic()`。因此它控制的是**每秒刷几波车**。
+---
 
-每波刷几辆由 `spawnTraffic()` 里的 `trafficDensityAccumulator` 决定：速度越高，双车波次越多；车道从三条车道中随机抽取且不重复，因此高速时中间车道约 57% 的波次开放、其余波次有车，不会一直空着。开局只布置 6 辆车，左右并排的波次会给中间留出通道。同样车速和波次数时，各设备刷出的车辆数相同。
-
-## 双人联机起跑与碰撞
-
-联机倒计时只由服务器统一安排：房间内两位车手都持续在线后才倒计时；发车前任何一位离开或掉线，倒计时会取消并等待对手回来。客户端不会自行补开倒计时。
-
-车辆按约 2.4 m 宽、4.9 m 长的车身矩形计算碰撞，并跟随弯道调整朝向。车身有实际间隙就可以通过；松开方向后会回到最近的车道中心，不能长期压着车道线当作空车道。撞击反馈有全局冷却且保留最低滚行速度，避免撞到多辆车时速度连乘到停住。
-
-前端、后端、房间同步都跑在同一台阿里云服务器上（部署目录 `/opt/playcargame`，仓库根目录与之对应），页面与 `/api/*` 同源。
-
-## 文件说明
+## 📁 五、文件说明与 API 接口
 
 | 文件 / 目录 | 作用 |
 | --- | --- |
-| [`index.html`](index.html) | 页面骨架：3D 画布、HUD（车速 / 比赛用时 / 最佳用时）、车王排行榜、房间入口、快捷键设置、小地图画布、音乐开关 |
-| [`game.js`](game.js) | 游戏主逻辑：Three.js 场景与赛道（含 U 型弯）、车辆物理、AI 车流、实体碰撞、计时与冲线判定、联机房间（SSE 实时同步）、小地图绘制、音效引擎 |
-| [`style.css`](style.css) | 全部界面样式（含移动端拇指控制布局） |
-| [`assets/three.min.js`](assets/three.min.js) | 本地 Three.js 引擎，不依赖 CDN |
-| [`assets/bgm.wav`](assets/bgm.wav) | 背景音乐（默认静音，点右上角喇叭才播放） |
-| [`assets/crash.wav`](assets/crash.wav) | 撞击音效 |
-| [`assets/coin.wav`](assets/coin.wav) | 金币音效 |
-| [`server.js`](server.js) | Node 后端：静态托管、成绩接口、房间接口、SSE 实时推送、5 秒判负 |
-| [`package.json`](package.json) | Node 项目描述与启动脚本 |
-| `data/scores.json` | 排行榜数据（运行时生成，按用时排序，不进 git） |
-| [`deploy/bootstrap.sh`](deploy/bootstrap.sh) | 服务器首次部署：克隆代码、恢复 `data/`、装 systemd + nginx、签发证书 |
-| [`deploy/deploy.sh`](deploy/deploy.sh) | 日常发布：`git pull` → 重启服务 → `nginx -t` → 健康检查 |
-| [`deploy/enable-tls.sh`](deploy/enable-tls.sh) | DNS 指向本机后一键签发证书并切到 443 |
-| [`deploy/nginx/game.yhj123.dpdns.org.conf`](deploy/nginx/game.yhj123.dpdns.org.conf) | 正式站点配置（80 跳转 + 443 反代到 Node） |
-| [`deploy/nginx/game.yhj123.dpdns.org.http.conf`](deploy/nginx/game.yhj123.dpdns.org.http.conf) | 过渡配置（只有 80，证书未签发时使用） |
-| [`deploy/systemd/playcargame.service`](deploy/systemd/playcargame.service) | 常驻服务定义（端口 3210，开机自启） |
-| [`scripts/deploy-remote.ps1`](scripts/deploy-remote.ps1) | Windows 本地一键：提交 → 推送 → 远端发布 |
-| [`docs/FRAMEWORK.md`](docs/FRAMEWORK.md) | 架构说明、接口清单、改游戏逻辑时的注意事项 |
-
-## 接口
+| [`index.html`](index.html) | 页面结构：3D 画布、CS:GO 圆形小地图、HUD、排行榜、双人席位卡片与音频标签 |
+| [`game.js`](game.js) | 核心逻辑：Three.js 渲染（全景天空穹顶/柔和云层/PBR 车模）、2400m 环山赛道、车辆动力学与刹车减速度、AI 车流、SSE 联机与小地图、7 首邓紫棋歌单与声效引擎 |
+| [`style.css`](style.css) | 界面样式（桌面与移动端拇指触控适配） |
+| [`server.js`](server.js) | Node 后端：静态托管（支持音频 206 Range 流式加载）、排行榜持久化、房间管理、准备锁与 40ms SSE 推送 |
+| [`assets/`](assets) | 本地 `three.min.js`、碰撞/金币音效及 7 首邓紫棋 MP3 歌单（不依赖外部 CDN） |
+| `data/scores.json` | 排行榜数据（运行后自动生成，按用时升序） |
+| [`deploy/`](deploy) | `systemd` 与 `Nginx` 生产部署参考配置 |
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/health` | 存活检查 |
-| GET | `/api/scores` | 排行榜（按用时升序） |
-| POST | `/api/scores` | 提交成绩 `{name, time}`，同名只留最快 |
-| POST | `/api/race/rooms` | `{action:"create", roomCode, name, finishDistance}` 房主建房；`{action:"join", roomCode, name}` 对方加入 |
-| POST | `/api/race/state` | 上报自身状态 `{roomCode, playerId, x, heading, speed, distance, finished, time}` |
-| POST | `/api/race/leave` | 退出房间，释放座位 |
-| GET | `/api/race/stream` | SSE 实时推送房间内对手状态（每 40ms） |
-
-## 玩法与规则
-
-1. **房主**填房间号 → 选比赛距离（1.5 km / 3 km）→ 点「创建房间」
-2. **对方**填同一个房间号 → 点「加入」（距离选项此时锁定，由房主决定）
-3. 两人都在场（3.5 秒内有心跳）才会出现 3-2-1 倒计时，同时起步
-4. 只有自己踩油门才走，松手约 1 秒停住，时速上限 200 km/h
-5. 撞到 AI 车是「弹开 + 减速」，不会出局
-6. 先到终点者胜；一方冲线后 **5 秒**内对手仍未到终点，比赛强制结束并判负
-7. 结算面板显示双方用时、冲线速度、最高速度；排行榜按用时升序，自己的名字高亮
-
-## 本地开发
-
-```bash
-node server.js      # 默认 3210 端口
-```
-
-`http://127.0.0.1:3210/` 即是完整游戏。
-
-## 发布
-
-```powershell
-pwsh -File scripts\deploy-remote.ps1 -Message "改了什么"
-```
-
-或服务器上执行 `bash /opt/playcargame/deploy/deploy.sh`。
-
-
-## 3D 车辆与四大自然主题场景
-
-- **流线三厢纯电轿车（`CAR_ASSETS` + `createTeslaCar()`）**：使用 `THREE.ExtrudeGeometry` 侧面轮廓拉伸车身，搭配全景熏黑玻璃座舱、深色侧裙/扩散器、矩阵 LED 前大灯、贯穿式红色尾灯与五辐风刃轮毂；几何体与基础材质全局共享，减少刷车时的性能开销。
-- **写实路边景物（`SCENERY_ASSETS`）**：支持 4 套主题地图（`country` 乡间小路、`island` 逃离荒岛、`jungle` 丛林狂飙、`river` 沿河峡谷），沿赛道两侧分布圆润奶牛、梅花鹿、石基农庄木屋、木格栅帆布风车、多层树冠大树、弯曲椰子树以及麦草垛、峡谷岩石等主题景物。
-
-## 联机房主同步、双车区分与断线重连
-
-1. **同一世界同步与房主权限**：房主创建房间时所选的**赛道主题（`theme`）**与**比赛距离（`finishDistance`）**会由服务端保存并同步给对手；未发车前仅房主可切换主题，加入方进入房间后场景与距离选择均自动锁定并与房主保持一致。
-2. **双车颜色区分与同世界碰撞**：己方与对手车辆使用高对比度撞色（电光蓝 `#29a3ff` / 亮橙 `#ff6b2b`）并配有车顶昵称牌，与灰暗民用 AI 车流区分开；两车在赛道上发生擦碰时会触发实体碰撞减速、提示与轻微横向弹开。
-3. **误退出 / 刷新重连**：对局进行中若意外退出房间或刷新页面，本地 `racerActiveRoom` 与服务端 `leftSeats` 会保留原座位、车道及行驶里程，重新输入同一房间号或刷新页面即可自动恢复回到当前对局。
-
-## 操控与移动端界面
-
-- **电脑端**：支持在菜单「操控与声音设置」中自定义油门、刹车、氮气、左转、右转快捷键（默认 `W` / `S` / `左 Shift` / `←` / `→`）。
-- **手机端**：采用拇指友好布局——左下角为左右转向键，右下方为油门与刹车，**氮气加速（左侧）与刹车（右侧）同一水平线对称放置**；氮气条与音效状态条避开按键区，同时也支持顶栏开启「手机倾斜」重力转向。
-- **声音系统**：采用 HTML5 原生 `<audio>` 与 Web Audio 双引擎（默认静音，可通过右上角喇叭或设置内试听按钮开启）。
+| `GET` | `/api/health` | 服务存活检查 |
+| `GET` / `POST` | `/api/scores` | 获取或提交排行榜成绩 `{name, time}` |
+| `POST` | `/api/race/rooms` | 创建或加入双人房间 `{action, roomCode, name, finishDistance, theme, difficulty}` |
+| `POST` | `/api/race/ready` | 切换准备状态 `{roomCode, playerId, ready}`，双方均 ready 后启动 3 秒倒计时 |
+| `POST` | `/api/race/rematch` | 完赛再来一局或中途退回双人准备区 `{roomCode, playerId, forceLobby}` |
+| `POST` | `/api/race/state` | 上报里程/坐标/状态并同步房主配置 |
+| `POST` | `/api/race/leave` | 彻底退出房间释放座位 |
+| `GET` | `/api/race/stream` | SSE 实时推送房间与对手状态（40ms） |
