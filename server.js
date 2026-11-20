@@ -16,8 +16,71 @@ function activePlayers(room) {
   return [...room.players.values()].filter(p => now - p.updatedAt < ACTIVE_MS);
 }
 
+function isPlayerActive(room, id) {
+  const p = room && id ? room.players.get(id) : null;
+  return Boolean(p && (Date.now() - p.updatedAt) < ACTIVE_MS);
+}
+
+function isRaceDriving(room) {
+  return Boolean(room && room.startAt && Date.now() >= room.startAt && !room.finishAt);
+}
+
 function laneStartX(lane) {
   return lane < 0 ? -(20 / 3) : (20 / 3);
+}
+
+function resetPlayerForLobby(player) {
+  player.ready = false;
+  player.finished = false;
+  player.x = laneStartX(player.lane);
+  player.heading = 0;
+  player.speed = 0;
+  player.distance = 0;
+  player.time = 0;
+  player.score = 0;
+  player.nitro = 100;
+  player.finished = false;
+  delete player.finishTime;
+  delete player.finishSpeed;
+}
+
+function resetRoomToLobby(room) {
+  room.startAt = 0;
+  room.finishAt = 0;
+  if (room.leftSeats) room.leftSeats.clear();
+  for (const p of room.players.values()) {
+    resetPlayerForLobby(p);
+  }
+}
+
+function applyHostSettings(room, body) {
+  const validThemes = new Set(["country", "island", "jungle", "river"]);
+  const validDiffs = new Set(["easy", "normal", "hard"]);
+  let changed = false;
+  if (body.theme !== undefined && validThemes.has(body.theme) && body.theme !== room.theme) {
+    room.theme = body.theme;
+    changed = true;
+  }
+  if (body.difficulty !== undefined && validDiffs.has(body.difficulty) && body.difficulty !== room.difficulty) {
+    room.difficulty = body.difficulty;
+    changed = true;
+  }
+  if (body.finishDistance !== undefined) {
+    const fd = Number(body.finishDistance);
+    if (Number.isFinite(fd) && fd >= 300) {
+      const clamped = Math.min(20000, fd);
+      if (clamped !== room.finishDistance) {
+        room.finishDistance = clamped;
+        changed = true;
+      }
+    }
+  }
+  if (changed) {
+    room.configVersion = (room.configVersion || 1) + 1;
+    // 房主修改任意配置后，取消双方准备状态，确保两人都确认最终配置再开始倒计时
+    for (const p of room.players.values()) p.ready = false;
+  }
+  return changed;
 }
 
 function scheduleRaceStart(room) {
@@ -27,19 +90,47 @@ function scheduleRaceStart(room) {
   room.finishAt = 0;
   if (room.leftSeats) room.leftSeats.clear();
   for (const player of room.players.values()) {
-    player.x = laneStartX(player.lane);
-    player.heading = 0;
-    player.speed = 0;
-    player.distance = 0;
-    player.time = 0;
-    player.score = 0;
-    player.nitro = 100;
-    player.finished = false;
-    delete player.finishTime;
-    delete player.finishSpeed;
+    resetPlayerForLobby(player);
+    player.ready = true;
     player.updatedAt = now;
   }
   room.startAt = now + 4000;
+}
+
+function maybeStartCountdown(room) {
+  if (!room || room.startAt || room.finishAt) return false;
+  const actives = activePlayers(room);
+  if (actives.length >= 2 && actives.every(p => Boolean(p.ready))) {
+    scheduleRaceStart(room);
+    return true;
+  }
+  return false;
+}
+
+function buildRoomSyncPayload(room, viewerId) {
+  const actives = activePlayers(room);
+  const viewer = viewerId ? room.players.get(viewerId) : null;
+  const others = actives.filter(p => p.id !== viewerId);
+  const pauseInfo = roomPauseInfo(room);
+  const finishRemainSec = room.finishAt ? Math.max(0, Math.ceil((10000 - (Date.now() - room.finishAt)) / 1000)) : 0;
+  return {
+    ok: true,
+    isHost: Boolean(viewerId && viewerId === room.hostId),
+    hostId: room.hostId || "",
+    configVersion: room.configVersion || 1,
+    myReady: Boolean(viewer && viewer.ready),
+    otherReady: Boolean(others[0] && others[0].ready),
+    startAt: room.startAt || 0,
+    serverNow: Date.now(),
+    finishDistance: room.finishDistance,
+    theme: room.theme || "country",
+    difficulty: room.difficulty || "normal",
+    playerCount: actives.length,
+    raceOver: Boolean(room.finishAt && Date.now() - room.finishAt > 10000),
+    finishRemainSec,
+    players: others,
+    ...pauseInfo
+  };
 }
 
 function saveLeftSeat(room, player) {
@@ -151,7 +242,16 @@ const server = http.createServer(async (request, response) => {
         const difficulty = validDiffs.has(body.difficulty) ? body.difficulty : "normal";
         const existing = raceRooms.get(roomCode);
         if (!existing) {
-          raceRooms.set(roomCode, { players: new Map(), leftSeats: new Map(), hostId: "", updatedAt: Date.now(), startAt: 0, finishDistance, theme, difficulty });
+          raceRooms.set(roomCode, { players: new Map(), leftSeats: new Map(), hostId: "", updatedAt: Date.now(), startAt: 0, finishAt: 0, finishDistance, theme, difficulty, configVersion: 1 });
+        } else if (!isRaceDriving(existing)) {
+          // 清理旧局残留或离线座位，复用旧房号创建时房主始终可重新配置并发起新一局
+          for (const [id, p] of existing.players) {
+            if (Date.now() - p.updatedAt >= ACTIVE_MS) existing.players.delete(id);
+          }
+          if (existing.finishAt > 0 || !isPlayerActive(existing, existing.hostId)) {
+            resetRoomToLobby(existing);
+            existing.hostId = "";
+          }
         }
       }
 
@@ -187,27 +287,24 @@ const server = http.createServer(async (request, response) => {
         resumedSeat.updatedAt = Date.now();
         resumedSeat.name = name;
         room.updatedAt = Date.now();
-        const pauseInfo = roomPauseInfo(room);
+        const ongoing = isRaceDriving(room);
+        if (!ongoing && resumedSeat.id === room.hostId && !room.startAt) {
+          applyHostSettings(room, body);
+        }
+        const sync = buildRoomSyncPayload(room, resumedSeat.id);
         return sendJson(response, 200, {
+          ...sync,
           roomCode,
           playerId: resumedSeat.id,
-          isHost: resumedSeat.id === room.hostId,
-          resumed: Boolean(room.startAt && Date.now() >= room.startAt && !room.finishAt),
+          resumed: ongoing,
           distance: resumedSeat.distance || 0,
           x: Number.isFinite(resumedSeat.x) ? resumedSeat.x : laneStartX(resumedSeat.lane),
           speed: resumedSeat.speed || 0,
           time: resumedSeat.time || 0,
           score: resumedSeat.score || 0,
           nitro: resumedSeat.nitro ?? 100,
-          startAt: room.startAt || 0,
-          serverNow: Date.now(),
-          finishDistance: room.finishDistance,
-          theme: room.theme || "country",
-          difficulty: room.difficulty || "normal",
-          playerCount: activePlayers(room).length,
           lane: resumedSeat.lane,
-          color: resumedSeat.color,
-          ...pauseInfo
+          color: resumedSeat.color
         });
       }
 
@@ -225,27 +322,26 @@ const server = http.createServer(async (request, response) => {
         }
         room.leftSeats.delete(nameKey);
       }
-      const hostMissing = !room.hostId || (!room.players.has(room.hostId) && !room.leftSeats.has(room.hostId));
+      const hostMissing = !room.hostId || !isPlayerActive(room, room.hostId) || (!room.players.has(room.hostId) && !room.leftSeats.has(room.hostId));
       if (hostMissing && (action === "create" || savedLeft?.isHost || !room.startAt)) {
         room.hostId = playerId;
       }
-      // 房主重建/接管未开赛房间时同步其最新赛道、距离与难度设置
+      // 房主创建/接管未开赛房间时同步其最新赛道、距离与难度设置
       if (playerId === room.hostId && !room.startAt) {
-        const fd = Number(body.finishDistance);
-        if (Number.isFinite(fd) && fd >= 300) room.finishDistance = Math.min(20000, fd);
-        if (new Set(["country", "island", "jungle", "river"]).has(body.theme)) room.theme = body.theme;
-        if (new Set(["easy", "normal", "hard"]).has(body.difficulty)) room.difficulty = body.difficulty;
+        applyHostSettings(room, body);
       }
       // 起跑车道和车身颜色都由服务器分配，两边看到的是同一套（左右不同车道）
       const occupiedLanes = new Set([...room.players.values()].map(player => player.lane));
       const lane = savedLeft ? savedLeft.lane : (occupiedLanes.has(-1) ? 1 : -1);
       // 颜色只做区分；选相近亮度，避免某个车手更醒目而占视觉优势。
       const color = savedLeft ? savedLeft.color : (lane === -1 ? "#29a3ff" : "#ff9a3c");
+      const activeRaceOngoing = isRaceDriving(room);
       room.players.set(playerId, {
         id: playerId,
         name,
         lane,
         color,
+        ready: activeRaceOngoing ? true : false,
         x: savedLeft ? (Number.isFinite(savedLeft.x) ? savedLeft.x : laneStartX(lane)) : laneStartX(lane),
         heading: savedLeft ? (savedLeft.heading || 0) : 0,
         speed: savedLeft ? (savedLeft.speed || 0) : 0,
@@ -258,21 +354,15 @@ const server = http.createServer(async (request, response) => {
       });
       room.updatedAt = Date.now();
 
-      // 两人到齐 → 安排统一起跑时刻（4 秒倒计时），双方同时归零起步（若对局已在进行且未结束则恢复，绝不清空进度）
-      const activeCount = activePlayers(room).length;
-      const activeRaceOngoing = Boolean(room.startAt && Date.now() >= room.startAt && !room.finishAt);
-      if (!activeRaceOngoing) {
-        if (activeCount < 2) {
-          room.startAt = 0;   // 只有一个人在房间里：绝不开赛
-        } else if (!room.startAt) {
-          scheduleRaceStart(room);
-        }
+      // 进房只落座展示双方车道，绝不直接倒计时；必须等两位车手都确认配置后各自点“准备”才统一倒计时发车
+      if (!activeRaceOngoing && !room.finishAt && !room.startAt) {
+        room.startAt = 0;
       }
-      const pauseInfo = roomPauseInfo(room);
+      const sync = buildRoomSyncPayload(room, playerId);
 
       return sendJson(response, 200, {
+        ...sync,
         roomCode, playerId,
-        isHost: playerId === room.hostId,
         resumed: activeRaceOngoing,
         distance: savedLeft ? (savedLeft.distance || 0) : 0,
         x: savedLeft ? (Number.isFinite(savedLeft.x) ? savedLeft.x : laneStartX(lane)) : laneStartX(lane),
@@ -280,15 +370,8 @@ const server = http.createServer(async (request, response) => {
         time: savedLeft ? (savedLeft.time || 0) : 0,
         score: savedLeft ? (savedLeft.score || 0) : 0,
         nitro: savedLeft && Number.isFinite(savedLeft.nitro) ? savedLeft.nitro : 100,
-        startAt: room.startAt || 0,
-        serverNow: Date.now(),
-        finishDistance: room.finishDistance,
-        theme: room.theme || "country",
-        difficulty: room.difficulty || "normal",
-        playerCount: activePlayers(room).length,
         lane,
-        color,
-        ...pauseInfo
+        color
       });
     }
 
@@ -310,16 +393,11 @@ const server = http.createServer(async (request, response) => {
           if (Number.isFinite(sp) && sp > 0) player.finishSpeed = Math.round(sp * 90);
         }
       }
-      // 只有房主在发车前可以切换房间赛道主题、比赛距离和难度
-      const validThemes = new Set(["country", "island", "jungle", "river"]);
-      const validDiffs = new Set(["easy", "normal", "hard"]);
-      if (body.playerId === room.hostId && (!room.startAt || Date.now() < room.startAt)) {
-        if (validThemes.has(body.theme)) room.theme = body.theme;
-        if (validDiffs.has(body.difficulty)) room.difficulty = body.difficulty;
-        const fd = Number(body.finishDistance);
-        if (Number.isFinite(fd) && fd >= 300) room.finishDistance = Math.min(20000, fd);
+      // 只要未开始倒计时（或上一局已结束等待重开时），房主可随时自由修改主题、距离与难度；更改会重置准备状态
+      if (body.playerId === room.hostId && !room.startAt) {
+        applyHostSettings(room, body);
       }
-      // 先刷新当前车手心跳，再统计在线人数，避免刚恢复连接时用旧时间误判房间人数。
+      // 先刷新当前车手心跳，再统计在线人数
       player.updatedAt = room.updatedAt = Date.now();
       for (const [id, other] of room.players) {
         if (id !== body.playerId && Date.now() - other.updatedAt > TIMEOUT_MS) {
@@ -327,57 +405,68 @@ const server = http.createServer(async (request, response) => {
           room.players.delete(id);
         }
       }
-      // 只有两位车手都在上报心跳时才安排统一倒计时；发车前有人离开就取消。
+      // 若倒计时中途有车手掉线离开，取消倒计时并重置准备状态
       const activeCount = activePlayers(room).length;
-      if (activeCount >= 2) {
-        if (!room.startAt) scheduleRaceStart(room);
-      } else if (room.startAt && Date.now() < room.startAt) {
+      if (activeCount < 2 && room.startAt && Date.now() < room.startAt) {
         room.startAt = 0;
+        for (const p of room.players.values()) p.ready = false;
       }
-      // 临时诊断：每 5 秒打印一次房间内每位车手的里程，用于定位"原地不动"
+      // 临时诊断：每 5 秒打印一次房间内每位车手的里程
       if (!room._logAt || Date.now() - room._logAt > 5000) {
         room._logAt = Date.now();
         const roster = [...room.players.values()]
-          .map(p => `${p.name}:dist=${Number(p.distance).toFixed(1)},spd=${Number(p.speed).toFixed(2)}`)
+          .map(p => `${p.name}:dist=${Number(p.distance).toFixed(1)},spd=${Number(p.speed).toFixed(2)},rdy=${p.ready ? 1 : 0}`)
           .join(" | ");
         console.log(`[room ${String(body.roomCode || "").toUpperCase()}] players=${room.players.size} startAt=${room.startAt} ${roster}`);
       }
-      const pauseInfo = roomPauseInfo(room);
-      const finishRemainSec = room.finishAt ? Math.max(0, Math.ceil((10000 - (Date.now() - room.finishAt)) / 1000)) : 0;
-      return sendJson(response, 200, {
-        ok: true,
-        startAt: room.startAt || 0,
-        serverNow: Date.now(),
-        finishDistance: room.finishDistance,
-        theme: room.theme || "country",
-        difficulty: room.difficulty || "normal",
-        playerCount: activeCount,
-        raceOver: Boolean(room.finishAt && Date.now() - room.finishAt > 10000),
-        finishRemainSec,
-        // 只返回仍在上报心跳的对手，离线车手不冒充仍在房间。
-        players: activePlayers(room).filter(p => p.id !== body.playerId),
-        ...pauseInfo
-      });
+      return sendJson(response, 200, buildRoomSyncPayload(room, body.playerId));
+    }
+
+    if (url.pathname === "/api/race/ready" && request.method === "POST") {
+      const body = JSON.parse(await readBody(request) || "{}");
+      const room = raceRooms.get(String(body.roomCode || "").toUpperCase());
+      if (!room || !room.players.has(body.playerId)) return sendJson(response, 404, { error: "联机房间已失效。" });
+      const player = room.players.get(body.playerId);
+      player.updatedAt = room.updatedAt = Date.now();
+      if (!room.startAt && !room.finishAt) {
+        player.ready = Boolean(body.ready);
+        maybeStartCountdown(room);
+      }
+      return sendJson(response, 200, buildRoomSyncPayload(room, player.id));
+    }
+
+    if (url.pathname === "/api/race/rematch" && request.method === "POST") {
+      const body = JSON.parse(await readBody(request) || "{}");
+      const room = raceRooms.get(String(body.roomCode || "").toUpperCase());
+      if (!room || !room.players.has(body.playerId)) return sendJson(response, 404, { error: "联机房间已失效。" });
+      const player = room.players.get(body.playerId);
+      player.updatedAt = room.updatedAt = Date.now();
+      const waitingOtherFinish = Boolean(
+        room.finishAt &&
+        (Date.now() - room.finishAt) <= 10000 &&
+        activePlayers(room).some(p => p.id !== player.id && !p.finished)
+      );
+      if (waitingOtherFinish) {
+        return sendJson(response, 200, { ...buildRoomSyncPayload(room, player.id), waitingOtherFinish: true });
+      }
+      if (room.startAt > 0 || room.finishAt > 0) {
+        resetRoomToLobby(room);
+        if (!room.hostId || !isPlayerActive(room, room.hostId)) room.hostId = player.id;
+        room.configVersion = (room.configVersion || 1) + 1;
+      } else {
+        resetPlayerForLobby(player);
+      }
+      return sendJson(response, 200, { ...buildRoomSyncPayload(room, player.id), waitingOtherFinish: false });
     }
 
     if (url.pathname === "/api/race/state" && request.method === "GET") {
       const room = raceRooms.get(String(url.searchParams.get("roomCode") || "").toUpperCase());
       if (!room) return sendJson(response, 404, { error: "联机房间已失效。" });
       const playerId = url.searchParams.get("playerId");
-      const pauseInfo = roomPauseInfo(room);
-      return sendJson(response, 200, {
-        players: activePlayers(room).filter(player => player.id !== playerId),
-        startAt: room.startAt || 0,
-        serverNow: Date.now(),
-        finishDistance: room.finishDistance,
-        theme: room.theme || "country",
-        difficulty: room.difficulty || "normal",
-        playerCount: activePlayers(room).length,
-        ...pauseInfo
-      });
+      return sendJson(response, 200, buildRoomSyncPayload(room, playerId));
     }
 
-    // 退出房间：保留中途误退出的座位快照以便重新加入（并暂停对局等待归队），未发车则重置倒计时
+    // 退出房间：保留中途误退出的座位快照以便重新加入（并暂停对局等待归队），未发车则取消倒计时并重置准备状态
     if (request.method === "POST" && url.pathname === "/api/race/leave") {
       const body = JSON.parse(await readBody(request) || "{}");
       const code = String(body.roomCode || "").toUpperCase();
@@ -393,6 +482,7 @@ const server = http.createServer(async (request, response) => {
             saveLeftSeat(room, leaving);
           } else if (!room.startAt || Date.now() < room.startAt) {
             room.startAt = 0;
+            for (const p of room.players.values()) p.ready = false;
           }
           room.players.delete(pid);
           room.updatedAt = Date.now();
@@ -417,21 +507,7 @@ const server = http.createServer(async (request, response) => {
       });
 
       const push = () => {
-        const players = activePlayers(room).filter(p => p.id !== viewerId);
-        const pauseInfo = roomPauseInfo(room);
-        const finishRemainSec = room.finishAt ? Math.max(0, Math.ceil((10000 - (Date.now() - room.finishAt)) / 1000)) : 0;
-        const data = {
-          players,
-          startAt: room.startAt || 0,
-          serverNow: Date.now(),
-          finishDistance: room.finishDistance,
-          theme: room.theme || "country",
-          difficulty: room.difficulty || "normal",
-          playerCount: activePlayers(room).length,
-          raceOver: Boolean(room.finishAt && Date.now() - room.finishAt > 10000),
-          finishRemainSec,
-          ...pauseInfo
-        };
+        const data = buildRoomSyncPayload(room, viewerId);
         try {
           response.write(`data: ${JSON.stringify(data)}\n\n`);
         } catch (error) {

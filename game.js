@@ -257,6 +257,12 @@ async function enterRaceRoom(rawCode, mode = "join") {
   raceSync.myLane = Number(result.lane) || 0;
   raceSync.myColor = result.color || "#ffffff";
   raceSync.finishRemainSec = 0;
+  raceSync.myReady = Boolean(result.myReady);
+  raceSync.otherReady = Boolean(result.otherReady);
+  raceSync.playerCount = Number(result.playerCount) || 1;
+  raceSync.configVersion = Number(result.configVersion) || 1;
+  raceSync.rematchQueued = false;
+  raceSync.configChangedNotice = false;
   raceSync.resumeState = result.resumed
     ? {
       distance: Number(result.distance) || 0,
@@ -270,51 +276,36 @@ async function enterRaceRoom(rawCode, mode = "join") {
   raceSync.pendingPaused = Boolean(result.paused);
   raceSync.pendingPausedReason = result.pausedReason || "";
   saveActiveRoom(roomCode, roomPlayerId, isHost);
-  if (Number(result.finishDistance) > 0) {
+  if ((!isHost || result.resumed) && Number(result.finishDistance) > 0) {
     finishDistance = Number(result.finishDistance);
+    const lengthSelect = document.querySelector("#raceLength");
+    if (lengthSelect) lengthSelect.value = String(finishDistance);
     const progTxt = document.querySelector("#raceProgressText");
     if (progTxt && !result.resumed) progTxt.textContent = `0 / ${finishDistance} m`;
   }
-  if (result.theme && THEMES[result.theme] && result.theme !== currentTheme) {
+  if ((!isHost || result.resumed) && result.theme && THEMES[result.theme] && result.theme !== currentTheme) {
     applyTheme(result.theme);
   }
-  if (result.difficulty && TRAFFIC_DIFFICULTIES[result.difficulty] && result.difficulty !== currentDifficulty) {
+  if ((!isHost || result.resumed) && result.difficulty && TRAFFIC_DIFFICULTIES[result.difficulty] && result.difficulty !== currentDifficulty) {
     applyDifficulty(result.difficulty);
   }
   if (!result.resumed) {
     carPhysics.x = getAssignedLaneX(raceSync.myLane);
     player.group.position.x = carPhysics.x + trackCurve(raceDistance);
   }
-  const laneLabel = raceSync.myLane < 0 ? "左侧车道" : "右侧车道";
   const joinBtnEl = document.querySelector("#joinRoom");
   if (joinBtnEl) joinBtnEl.textContent = "进入";
-  const total = Number(result.playerCount) || 1;
-  document.querySelector("#roomStatus").textContent = result.resumed
-    ? `已重连回房间 ${roomCode} · 正在恢复当前对局…`
-    : (total >= 2
-      ? (isHost
-        ? `房间 ${roomCode}（你是房主·${laneLabel}）· 两人已就位，马上发车`
-        : `已加入 ${roomCode}（${laneLabel}）· 一切设置均由房主决定，马上发车`)
-      : (isHost
-        ? `房间 ${roomCode}（你是房主·${laneLabel}）· 可调整主题/距离/难度，等待对手加入`
-        : `已加入 ${roomCode}（${laneLabel}）· 一切设置均由房主决定，等待对手`));
   const input = document.querySelector("#roomCodeInput");
   if (input) input.value = roomCode;
   document.querySelector("#roomControls")?.classList.add("in-room");
-  setRoomBadge(roomCode);
+  setRoomBadge(roomCode, false, `${raceSync.playerCount}/2 人`);
+  syncHostControlsLock();
   updateStartButtonForRoom();
-  const lengthSelect = document.querySelector("#raceLength");
-  if (lengthSelect) {
-    if (Number(result.finishDistance) > 0) lengthSelect.value = String(finishDistance);
-    lengthSelect.disabled = !isHost;
-    lengthSelect.title = isHost ? "房主可修改比赛距离" : "一切设置均由房主决定";
+  if (result.resumed) {
+    document.querySelector("#roomStatus").textContent = `已重连回房间 ${roomCode} · 正在恢复当前对局…`;
+  } else {
+    updateRoomLobbyStatus();
   }
-  const diffSelect = document.querySelector("#difficultySelect");
-  if (diffSelect) {
-    diffSelect.disabled = !isHost;
-    diffSelect.title = isHost ? "房主可修改车流难度" : "一切设置均由房主决定";
-  }
-  setThemeLocked(!isHost);
   if (roomPollTimer) clearInterval(roomPollTimer);
   roomPollTimer = setInterval(syncRaceRoom, 60);
   startRaceStream();
@@ -370,6 +361,12 @@ async function leaveRaceRoom(silent = false, keepResume = false) {
   raceSync.launched = false;
   raceSync.startAt = 0;
   raceSync.finishRemainSec = 0;
+  raceSync.myReady = false;
+  raceSync.otherReady = false;
+  raceSync.playerCount = 1;
+  raceSync.configVersion = 0;
+  raceSync.rematchQueued = false;
+  raceSync.configChangedNotice = false;
   raceSync.pendingPaused = false;
   raceSync.pendingPausedReason = "";
   if (raceSync.countdownTimer) {
@@ -396,7 +393,7 @@ async function leaveRaceRoom(silent = false, keepResume = false) {
     diffSelect.title = "";
   }
   raceSync.isHost = false;
-  setThemeLocked(false);
+  syncHostControlsLock();
   setRoomBadge("");
   updateStartButtonForRoom();
   if (!silent) {
@@ -412,8 +409,27 @@ async function leaveRaceRoom(silent = false, keepResume = false) {
   }
 }
 
-// ── 联机同步开局：两人分占左右不同车道同时出发 ──
-const raceSync = { startAt: 0, armed: false, locked: false, launched: false, paused: false, countdownTimer: null, remoteId: "", finishRemainSec: 0 };
+// ── 联机同步开局：房主确认配置，双方点“准备”后分占左右不同车道统一倒计时出发 ──
+const raceSync = {
+  startAt: 0,
+  armed: false,
+  locked: false,
+  launched: false,
+  paused: false,
+  countdownTimer: null,
+  remoteId: "",
+  finishRemainSec: 0,
+  isHost: false,
+  myLane: 0,
+  myColor: "",
+  myReady: false,
+  otherReady: false,
+  playerCount: 1,
+  configVersion: 0,
+  rematchQueued: false,
+  configChangedNotice: false,
+  lastConfigEditAt: 0
+};
 
 function getAssignedLaneX(lane) {
   const playerLaneIndex = Number(lane) < 0 ? 0 : LANE_COUNT - 1;
@@ -476,35 +492,187 @@ function ensureCountdownEl() {
   return el;
 }
 
-function setThemeLocked(locked) {
+function setThemeLocked(locked, byNonHost = true) {
+  const tip = !locked ? "" : (byNonHost ? "一切设置均由房主决定" : "倒计时或比赛中不可切换");
   if (quickSceneSelect) {
     quickSceneSelect.disabled = locked;
-    quickSceneSelect.title = locked ? "赛道主题由房主决定" : "切换场景";
+    quickSceneSelect.title = locked ? tip : "切换场景";
   }
   document.querySelectorAll(".theme-chip").forEach(chip => {
     chip.disabled = locked;
-    chip.title = locked ? "赛道主题由房主决定" : "";
+    chip.title = tip;
   });
+}
+
+function syncHostControlsLock() {
+  const inRoom = Boolean(roomCode);
+  const canHostEdit = !inRoom || (raceSync.isHost && !raceSync.armed && !raceSync.launched);
+  const nonHostLock = inRoom && !raceSync.isHost;
+  setThemeLocked(!canHostEdit, nonHostLock);
+  const tip = canHostEdit ? "房主可修改并需双方重新点准备" : (nonHostLock ? "一切设置均由房主决定" : "倒计时或比赛中不可修改");
+  const lengthSelect = document.querySelector("#raceLength");
+  if (lengthSelect) {
+    lengthSelect.disabled = !canHostEdit;
+    lengthSelect.title = inRoom ? tip : "";
+  }
+  const diffSelect = document.querySelector("#difficultySelect");
+  if (diffSelect) {
+    diffSelect.disabled = !canHostEdit;
+    diffSelect.title = inRoom ? tip : "";
+  }
+}
+
+function updateRoomLobbyStatus(overrideText = "") {
+  if (!roomCode || running || raceSync.armed) return;
+  const status = document.querySelector("#roomStatus");
+  if (!status) return;
+  if (overrideText) {
+    status.textContent = overrideText;
+    return;
+  }
+  const laneLabel = raceSync.myLane < 0 ? "左侧车道" : "右侧车道";
+  const count = Number(raceSync.playerCount) || 1;
+  const otherName = raceSync.remoteName || "对手";
+  const cfgChanged = raceSync.configChangedNotice ? "房主改了配置，请确认后重点准备 · " : "";
+  if (raceSync.launched) {
+    status.textContent = raceSync.rematchQueued
+      ? `房间 ${roomCode} · 等待对手完成冲线后自动回到准备区…`
+      : `房间 ${roomCode} · 本局结束，点下方「再跑一圈 / 再来一局」回准备区`;
+    return;
+  }
+  if (count < 2) {
+    status.textContent = raceSync.isHost
+      ? `房间 ${roomCode}（你是房主·${laneLabel}）· ${raceSync.myReady ? "你已准备 · 等对手加入" : "可随时改主题/距离/难度 · 等对手加入并点准备"}`
+      : `已加入 ${roomCode}（${laneLabel}）· ${raceSync.myReady ? "你已准备 · 等房主回房" : "等待房主加入…"}`;
+    return;
+  }
+  if (raceSync.myReady && raceSync.otherReady) {
+    status.textContent = `房间 ${roomCode} · 双方已准备！正在进入发车倒计时…`;
+  } else if (raceSync.myReady) {
+    status.textContent = `房间 ${roomCode}（${laneLabel}）· 你已准备，等待 ${otherName} 点「准备」`;
+  } else if (raceSync.otherReady) {
+    status.textContent = `房间 ${roomCode}（${laneLabel}）· ${otherName} 已准备！确认当前设置后点下方准备立即发车`;
+  } else if (raceSync.isHost) {
+    status.textContent = `房间 ${roomCode}（你是房主·${laneLabel}）· 改完设置后请与 ${otherName} 各自点「准备」`;
+  } else {
+    status.textContent = `已加入 ${roomCode}（${laneLabel}）· ${cfgChanged}房主 ${otherName} 可改设置，确认后点下方「点击准备」`;
+  }
 }
 
 function updateStartButtonForRoom() {
   const btn = document.querySelector("#start");
   if (!btn) return;
+  btn.classList.remove("is-ready", "ready-prompt");
   if (!roomCode) {
     btn.disabled = false;
-    if (btn.textContent.includes("等待对手") || btn.textContent.includes("倒计时")) {
+    if (
+      btn.textContent.includes("准备") ||
+      btn.textContent.includes("等待") ||
+      btn.textContent.includes("倒计时") ||
+      btn.textContent.includes("再跑")
+    ) {
       btn.textContent = "启动出发";
     }
     return;
   }
-  if (!raceSync.armed) {
+  if (raceSync.launched && !running) {
+    btn.disabled = raceSync.rematchQueued;
+    if (raceSync.rematchQueued) btn.textContent = "等待对手完成本局…";
+    return;
+  }
+  if (raceSync.armed && !raceSync.launched) {
     btn.disabled = true;
-    btn.textContent = "等待第 2 位车手加入…";
-  } else if (!raceSync.launched) {
-    btn.disabled = true;
-    btn.textContent = "两人已就位，倒计时发车…";
+    btn.textContent = "双方已准备，倒计时发车…";
+    return;
+  }
+  btn.disabled = false;
+  const count = Number(raceSync.playerCount) || 1;
+  if (raceSync.myReady) {
+    btn.classList.add("is-ready");
+    btn.textContent = count < 2
+      ? "✓ 已准备（等对手加入 · 再点取消）"
+      : "✓ 已准备（等对手点准备 · 再点取消）";
+  } else if (count >= 2 && raceSync.otherReady) {
+    btn.classList.add("ready-prompt");
+    btn.textContent = "对手已准备 · 点我准备立即发车！";
   } else {
-    btn.disabled = false;
+    btn.textContent = raceSync.isHost ? "确定配置 · 点击准备" : "点击准备";
+  }
+}
+
+function notifyHostConfigChanged() {
+  if (!roomCode || !raceSync.isHost || raceSync.armed || raceSync.launched) return;
+  raceSync.lastConfigEditAt = Date.now();
+  raceSync.myReady = false;
+  raceSync.otherReady = false;
+  updateStartButtonForRoom();
+  updateRoomLobbyStatus();
+  syncRaceRoom();
+}
+
+async function toggleRaceReady(nextReady) {
+  if (!roomCode || !roomPlayerId || raceSync.armed || raceSync.launched) return;
+  try {
+    const res = await api.post("/api/race/ready", {
+      roomCode,
+      playerId: roomPlayerId,
+      ready: Boolean(nextReady)
+    });
+    raceSync.configChangedNotice = false;
+    applyRaceStart(res);
+  } catch (error) {
+    const status = document.querySelector("#roomStatus");
+    if (status) status.textContent = error.message || "切换准备状态失败，请重试";
+  }
+}
+
+async function requestRaceRematch() {
+  if (!roomCode || !roomPlayerId) return;
+  try {
+    const res = await api.post("/api/race/rematch", { roomCode, playerId: roomPlayerId });
+    if (res.waitingOtherFinish) {
+      raceSync.rematchQueued = true;
+      updateStartButtonForRoom();
+      updateRoomLobbyStatus();
+      return;
+    }
+    raceSync.rematchQueued = false;
+    raceSync.launched = false;
+    raceSync.armed = false;
+    raceSync.locked = false;
+    raceSync.startAt = 0;
+    raceSync.finishRemainSec = 0;
+    raceSync.configChangedNotice = false;
+    lastGapLabel = "";
+    resetGame();
+    applyRaceStart(res);
+    carPhysics.x = getAssignedLaneX(raceSync.myLane);
+    player.group.position.x = carPhysics.x + trackCurve(0);
+    if (remoteCar && raceSync.other) {
+      const rx = Number.isFinite(Number(raceSync.other.x)) ? Number(raceSync.other.x) : getAssignedLaneX(-raceSync.myLane);
+      remoteCar.group.position.set(rx + trackCurve(0), 0, 0);
+      remoteCar.group.visible = true;
+    }
+    const rivalEl = document.querySelector("#rivalMarker");
+    if (rivalEl) rivalEl.style.display = "none";
+    title.textContent = "公路漫游 3D";
+    message.textContent = raceSync.isHost
+      ? "已回到准备房间！你是房主，可随时修改主题/距离/难度，两人点「准备」后发车。"
+      : "已回到准备房间！房主可修改赛道设置，确认后点「准备」即可开始下一局。";
+    setMenuVisible(true);
+    syncHostControlsLock();
+    updateStartButtonForRoom();
+    updateRoomLobbyStatus();
+  } catch (error) {
+    // 若服务端房间已因长时间无心跳被清理，回退到重新建/进同一房号
+    const code = roomCode;
+    const wasHost = raceSync.isHost;
+    leaveRaceRoom(true)
+      .then(() => enterRaceRoom(code, wasHost ? "create" : "join"))
+      .catch(err => {
+        const status = document.querySelector("#roomStatus");
+        if (status) status.textContent = err.message || "回到准备房间失败";
+      });
   }
 }
 
@@ -522,28 +690,54 @@ function cancelPendingRaceCountdown() {
   const countdown = document.querySelector("#raceCountdown");
   if (countdown) countdown.style.display = "none";
   if (wasPending && roomCode) {
-    const status = document.querySelector("#roomStatus");
-    if (status) status.textContent = `房间 ${roomCode} · 等待两位车手都在房间内，再开始倒计时`;
+    updateRoomLobbyStatus();
   }
+  syncHostControlsLock();
   updateStartButtonForRoom();
 }
 
 function applyRaceStart(payload) {
   if (payload) {
-    if (Number(payload.finishDistance) > 0 && (!raceSync.isHost || !raceSync.launched)) {
-      finishDistance = Number(payload.finishDistance);
-      const sel = document.querySelector("#raceLength");
-      if (sel) sel.value = String(finishDistance);
-      if (!running) {
-        const txtEl = document.querySelector("#raceProgressText");
-        if (txtEl) txtEl.textContent = `0 / ${finishDistance} m`;
+    const prevHost = raceSync.isHost;
+    if (typeof payload.isHost === "boolean") raceSync.isHost = payload.isHost;
+    if (Number.isFinite(Number(payload.playerCount))) raceSync.playerCount = Number(payload.playerCount);
+
+    const nextVer = Number(payload.configVersion) || 0;
+    const editingJustNow = Date.now() - raceSync.lastConfigEditAt < 450;
+    if (!editingJustNow) {
+      if (typeof payload.myReady === "boolean") raceSync.myReady = payload.myReady;
+      if (typeof payload.otherReady === "boolean") raceSync.otherReady = payload.otherReady;
+    }
+    if (!raceSync.isHost && nextVer > 0 && raceSync.configVersion > 0 && nextVer !== raceSync.configVersion && !raceSync.launched) {
+      raceSync.configChangedNotice = true;
+    }
+    if (nextVer > 0) raceSync.configVersion = nextVer;
+
+    if (!raceSync.isHost) {
+      if (Number(payload.finishDistance) > 0) {
+        finishDistance = Number(payload.finishDistance);
+        const sel = document.querySelector("#raceLength");
+        if (sel) sel.value = String(finishDistance);
+        if (!running) {
+          const txtEl = document.querySelector("#raceProgressText");
+          if (txtEl) txtEl.textContent = `0 / ${finishDistance} m`;
+        }
+      }
+      if (payload.theme && THEMES[payload.theme] && payload.theme !== currentTheme) {
+        applyTheme(payload.theme);
+      }
+      if (payload.difficulty && TRAFFIC_DIFFICULTIES[payload.difficulty] && payload.difficulty !== currentDifficulty) {
+        applyDifficulty(payload.difficulty);
       }
     }
-    if (!raceSync.isHost && payload.theme && THEMES[payload.theme] && payload.theme !== currentTheme) {
-      applyTheme(payload.theme);
-    }
-    if (!raceSync.isHost && payload.difficulty && TRAFFIC_DIFFICULTIES[payload.difficulty] && payload.difficulty !== currentDifficulty) {
-      applyDifficulty(payload.difficulty);
+    if (prevHost !== raceSync.isHost) syncHostControlsLock();
+
+    if (
+      raceSync.launched && !running && raceSync.rematchQueued &&
+      (payload.raceOver || Number(payload.startAt || 0) === 0 || Number(payload.playerCount) < 2 || Boolean(payload.players?.[0]?.finished))
+    ) {
+      requestRaceRematch();
+      return;
     }
   }
   const playerCount = Number(payload?.playerCount);
@@ -554,6 +748,10 @@ function applyRaceStart(payload) {
   const raceAlreadyRunning = Boolean(payload?.resumed || (startAt > 0 && Date.now() >= localStart && raceSync.launched));
   if (!payload || !startAt || (!raceAlreadyRunning && (!Number.isFinite(playerCount) || playerCount < 2))) {
     cancelPendingRaceCountdown();
+    if (!raceSync.launched && !running) {
+      updateRoomLobbyStatus();
+      if (roomCode) setRoomBadge(roomCode, false, `${raceSync.playerCount}/2 人`);
+    }
     return;
   }
   // 已经发车了就忽略服务端后续的时刻变化，避免比赛被打断
@@ -563,6 +761,7 @@ function applyRaceStart(payload) {
   raceSync.startAt = localStart;
   raceSync.armed = true;
   raceSync.launched = false;
+  syncHostControlsLock();
   updateStartButtonForRoom();
   startMultiRaceCountdown();
 }
@@ -687,9 +886,8 @@ async function syncRaceRoom() {
       other = result.players[0];
     }
     if (!other) {
-      document.querySelector("#roomStatus").textContent = posted.paused
-        ? `房间 ${roomCode} · ${posted.pausedReason || "已暂停，等待对手重进房间…"}`
-        : `房间码 ${roomCode} · 等待朋友加入`;
+      raceSync.other = null;
+      raceSync.remoteId = "";
       if (raceSync.locked) {                 // 对手跑了就别把玩家冻在倒计时里
         raceSync.locked = false;
         raceSync.armed = false;
@@ -702,6 +900,7 @@ async function syncRaceRoom() {
         const el = document.querySelector("#raceCountdown");
         if (el) el.style.display = "none";
       }
+      updateRoomLobbyStatus(posted.paused ? `房间 ${roomCode} · ${posted.pausedReason || "已暂停，等待对手重进房间…"}` : "");
       return;
     }
     raceSync.remoteId = other.id;
@@ -750,6 +949,8 @@ function updateRemoteCar(other) {
     heading: Number(other.heading) || 0,
     speed: Number(other.speed) || 0,
     distance: Number(other.distance) || 0,
+    finished: Boolean(other.finished),
+    ready: Boolean(other.ready),
     finishTime: Number(other.finishTime) || 0,
     finishSpeed: Number(other.finishSpeed) || 0,
     at: Date.now()
@@ -795,6 +996,12 @@ let lastGapAt = 0;
 function refreshGapHud() {
   const other = raceSync.other;
   if (!other) return;
+  if (!raceSync.launched) {
+    updateRoomLobbyStatus();
+    const readyHint = `${raceSync.myReady ? "你已准备" : "未准备"} / 对手${raceSync.otherReady ? "已准备" : "未准备"}`;
+    setRoomBadge(roomCode, false, readyHint);
+    return;
+  }
   const rel = other.distance - raceDistance;
   const gap = Math.abs(Math.round(rel));
   const gapLabel = gap < 3 ? "并驾齐驱" : (rel >= 0 ? `落后 ${gap} m` : `领先 ${gap} m`);
@@ -3024,28 +3231,22 @@ function resetGame() {
 
 function startGame() {
   if (roomCode && raceSync.launched && !running) {
-    // 上一局联机已结束：重新进房等待两位车手再次到齐后统一倒计时发车
-    const code = roomCode;
-    leaveRaceRoom(true)
-      .then(() => enterRaceRoom(code, "create"))
-      .catch(error => {
-        const status = document.querySelector("#roomStatus");
-        if (status) status.textContent = error.message || "重新进房失败";
-      });
+    // 上一局已结束：点“再跑一圈 / 再来一局”回到准备房间（保留房号、房主与自由修改配置）
+    requestRaceRematch();
     return;
   }
   if (roomCode && raceSync.armed && !running && Date.now() >= raceSync.startAt) {
     launchMultiRace();
     return;
   }
-  // 联机中：两人没到齐就不许先跑，必须一起发车
-  if (roomCode && !raceSync.armed) {
-    document.querySelector("#roomStatus").textContent = "等对手进入同一个房间号后，两人一起发车";
-    updateStartButtonForRoom();
-    return;
-  }
   // 联机倒计时未结束前，手动开始无效，等统一发车
   if (roomCode && raceSync.armed && Date.now() < raceSync.startAt) return;
+  // 联机大厅等待中：点下方主按钮切换「准备 / 取消准备」，双方都确定并准备就绪才开始倒计时！
+  if (roomCode && !raceSync.armed && !raceSync.launched) {
+    sound.ensureContext();
+    toggleRaceReady(!raceSync.myReady);
+    return;
+  }
   sound.ensureContext();
   running = true;
   setMenuVisible(false);
@@ -3958,39 +4159,39 @@ window.addEventListener("resize", () => {
 // 场景切换
 document.querySelectorAll(".theme-chip").forEach(chip => {
   chip.addEventListener("click", () => {
-    if (roomCode && !raceSync.isHost) return;
+    if (roomCode && (!raceSync.isHost || raceSync.armed || raceSync.launched)) return;
     applyTheme(chip.dataset.theme);
-    if (roomCode && raceSync.isHost) syncRaceRoom();
+    notifyHostConfigChanged();
   });
 });
 
 if (quickSceneSelect) {
   quickSceneSelect.addEventListener("change", (e) => {
-    if (roomCode && !raceSync.isHost) {
+    if (roomCode && (!raceSync.isHost || raceSync.armed || raceSync.launched)) {
       e.target.value = currentTheme;
       return;
     }
     applyTheme(e.target.value);
-    if (roomCode && raceSync.isHost) syncRaceRoom();
+    notifyHostConfigChanged();
   });
 }
 
 const difficultySelect = document.querySelector("#difficultySelect");
 if (difficultySelect) {
   difficultySelect.addEventListener("change", (e) => {
-    if (roomCode && !raceSync.isHost) {
+    if (roomCode && (!raceSync.isHost || raceSync.armed || raceSync.launched)) {
       e.target.value = currentDifficulty;
       return;
     }
     applyDifficulty(e.target.value);
-    if (roomCode && raceSync.isHost) syncRaceRoom();
+    notifyHostConfigChanged();
   });
 }
 
 const raceLengthSelect = document.querySelector("#raceLength");
 if (raceLengthSelect) {
   raceLengthSelect.addEventListener("change", (e) => {
-    if (roomCode && !raceSync.isHost) {
+    if (roomCode && (!raceSync.isHost || raceSync.armed || raceSync.launched)) {
       e.target.value = String(finishDistance || 1500);
       return;
     }
@@ -3998,7 +4199,7 @@ if (raceLengthSelect) {
     finishDistance = nextDist;
     const progTxt = document.querySelector("#raceProgressText");
     if (progTxt && !running) progTxt.textContent = `0 / ${finishDistance} m`;
-    if (roomCode && raceSync.isHost) syncRaceRoom();
+    notifyHostConfigChanged();
   });
 }
 

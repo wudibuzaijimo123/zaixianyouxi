@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Orbitron:wght@500;800;900&family=Rajdhani:wght@600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=60">
+  <link rel="stylesheet" href="style.css?v=61">
 </head>
 <body>
   <!-- 3D WebGL Canvas 容器 -->
@@ -146,7 +146,7 @@
 
         <!-- 双人联机 -->
         <section class="menu-section room-controls" id="roomControls">
-          <div class="theme-label">双人联机 <small>两人输入同一个房间号即可同场比赛</small></div>
+          <div class="theme-label">双人联机 <small>先「创建」并改好配置，朋友输同号「进入」，双方都点「准备」后才倒计时发车</small></div>
           <div class="room-join-row">
             <input id="roomCodeInput" maxlength="8" placeholder="房间号（3~8 位字母/数字）" autocapitalize="characters" autocomplete="off" enterkeyhint="go">
             <button id="joinRoom" type="button">进入</button>
@@ -207,6 +207,6 @@
 
   <!-- 本地 Three.js 核心库 -->
   <script src="assets/three.min.js"></script>
-  <script src="game.js?v=89"></script>
+  <script src="game.js?v=90"></script>
 </body>
 </html>
