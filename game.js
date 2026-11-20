@@ -1198,7 +1198,7 @@ function updateRemoteCar(other) {
       remoteCar.group.position.set(idlePt.x, idlePt.y, idlePt.z);
     }
   }
-  const displayName = String(other.name || "真人对手").trim() || "真人对手";
+  const displayName = String(other.name || "对手").trim() || "对手";
   if (!raceSync.tag || raceSync.tagName !== displayName || raceSync.tag.parent !== remoteCar.group) {
     if (raceSync.tag && raceSync.tag.parent) raceSync.tag.parent.remove(raceSync.tag);
     raceSync.tag = makeNameTag(displayName);
@@ -1237,7 +1237,7 @@ function refreshGapHud() {
   lastGapLabel = badgeText;
   lastGapAt = now;
   const status = document.querySelector("#roomStatus");
-  if (status) status.textContent = `房间 ${roomCode} · 真人对手：${rivalLabel} · ${badgeText}`;
+  if (status) status.textContent = `房间 ${roomCode} · 对手：${rivalLabel} · ${badgeText}`;
   setRoomBadge(roomCode, false, badgeText);
 }
 
@@ -1256,7 +1256,7 @@ function updateRivalMarker(rel, rivalOnRoad = true) {
   }
   const ahead = rel > 0;
   const rivalLabel = String(raceSync.other.name || "对手").trim().slice(0, 10) || "对手";
-  const text = ahead ? `▲ 真人·${rivalLabel} 领先 ${Math.round(rel)} m` : `▼ 真人·${rivalLabel} 落后 ${Math.round(-rel)} m`;
+  const text = ahead ? `▲ ${rivalLabel} 领先 ${Math.round(rel)} m` : `▼ ${rivalLabel} 落后 ${Math.round(-rel)} m`;
   if (text !== lastRivalText) {
     lastRivalText = text;
     el.textContent = text;
@@ -2744,7 +2744,7 @@ function makeNameTag(text) {
   canvas.height = 128;
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, 512, 128);
-  const label = `真人 · ${String(text || "对手").trim().slice(0, 10) || "对手"}`;
+  const label = String(text || "对手").trim().slice(0, 12) || "对手";
   ctx.font = "900 44px 'Microsoft YaHei','PingFang SC','Rajdhani',sans-serif";
   const textWidth = ctx.measureText(label).width;
   const padX = 34;
@@ -4233,7 +4233,7 @@ function drawMinimap() {
       ctx.fill();
       ctx.stroke();
     }
-    const radarName = String(other.name || "真人").trim().slice(0, 8);
+    const radarName = String(other.name || "").trim().slice(0, 8);
     if (radarName) {
       ctx.font = "bold 9px sans-serif";
       ctx.textAlign = "center";
