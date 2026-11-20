@@ -748,11 +748,12 @@ function setRoomBadge(code, offline = false, gapText = "") {
 // ═══════════════════════════════════════
 class MusicEngine {
   constructor() {
-    // 默认静音：只有玩家自己点开才出声，手机和电脑一致
-    this.enabled = localStorage.getItem("racerAudioEnabled") === "1";
+    // 每次进入默认静音，只有玩家主动点开声音或选歌才播放
+    this.enabled = false;
     this.bgmAudio = null;
     this.crashAudio = null;
     this.coinAudio = null;
+    this.customTrackUrl = "";
     this.ctx = null;
     this.engineGain = null;
     this.engineOsc = null;
@@ -840,15 +841,15 @@ class MusicEngine {
       } catch (e) {}
     }
 
-    // 2. Web Audio 双保险流行曲合成循环（与 bgm.wav 同款王道流行进行 Fmaj7-G6-Em7-Am7）
+    // 2. Web Audio 双保险欢快流行曲合成循环（128 BPM 阳光流行钢琴进行）
     if (this.ctx && !this.synthTimer) {
       const melody = [
-        659.25, 659.25, 783.99, 880.00, 783.99, 659.25, 587.33, 523.25,
-        587.33, 659.25, 783.99, 0,      659.25, 587.33, 523.25, 0,
-        659.25, 659.25, 783.99, 880.00, 1046.5, 880.00, 783.99, 659.25,
-        783.99, 880.00, 659.25, 0,      523.25, 587.33, 659.25, 0
+        783.99, 1046.5, 880.00, 783.99, 659.25, 783.99, 1046.5, 0,
+        783.99, 987.77, 880.00, 783.99, 659.25, 587.33, 659.25, 0,
+        880.00, 1046.5, 1174.7, 1046.5, 880.00, 783.99, 880.00, 0,
+        783.99, 659.25, 587.33, 659.25, 783.99, 880.00, 783.99, 0
       ];
-      const bass = [87.31, 87.31, 98.00, 98.00, 82.41, 82.41, 110.00, 110.00];
+      const bass = [130.81, 130.81, 98.00, 98.00, 110.00, 110.00, 82.41, 82.41];
 
       this.synthTimer = setInterval(() => {
         if (!this.enabled || !running || !this.ctx || this.ctx.state !== "running") return;
@@ -3383,6 +3384,32 @@ const exitGameBtn = document.querySelector("#exitGameBtn");
 if (exitGameBtn) {
   exitGameBtn.addEventListener("click", () => {
     exitCurrentGame();
+  });
+}
+
+const customMusicInput = document.querySelector("#customMusicInput");
+const customMusicName = document.querySelector("#customMusicName");
+if (customMusicInput) {
+  customMusicInput.addEventListener("change", (event) => {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+    sound.ensureContext();
+    if (sound.customTrackUrl) {
+      try { URL.revokeObjectURL(sound.customTrackUrl); } catch (e) {}
+    }
+    sound.customTrackUrl = URL.createObjectURL(file);
+    if (sound.bgmAudio) {
+      sound.bgmAudio.src = sound.customTrackUrl;
+      sound.bgmAudio.loop = true;
+    }
+    sound.enabled = true;
+    sound.startBGM();
+    syncAudioUI();
+    if (customMusicName) customMusicName.textContent = `当前曲目：${file.name}`;
+    if (testAudioBtn) {
+      testAudioBtn.textContent = "🎵 正在播放自选歌曲";
+      testAudioBtn.classList.add("playing");
+    }
   });
 }
 

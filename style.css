@@ -968,6 +968,29 @@ p {
   cursor: pointer;
 }
 .test-audio-btn.playing { border-color: #28e678; background: rgba(40, 230, 120, .2); color: #28e678; }
+.custom-music-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 8px;
+  padding: 9px 12px;
+  border: 1px dashed rgba(182, 92, 255, .55);
+  border-radius: 14px;
+  background: rgba(169, 92, 255, .1);
+  color: #e4c6ff;
+  font: 700 12px 'Rajdhani', sans-serif;
+  cursor: pointer;
+}
+.custom-music-btn input { display: none; }
+.custom-music-name {
+  margin-top: 6px;
+  color: #8f9abd;
+  font-size: 11px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* 触屏设备不需要键盘快捷键设置 */
 @media (pointer: coarse) {
