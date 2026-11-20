@@ -308,7 +308,7 @@ body.menu-open .exit-btn { display: none; }
    ═══════════════════════════════════════ */
 .leaderboard {
   position: fixed;
-  top: 90px;
+  top: 102px;
   right: 20px;
   z-index: 10;
   width: min(286px, 28vw);
@@ -834,8 +834,16 @@ p {
 @media (max-width: 850px) {
   .leaderboard { display: none; }
   .server { display: none; }
-  .impact-hud { top: 134px; }
-  .sound-status { right: 10px; top: 164px; bottom: auto; }
+  .impact-hud { top: 232px; }
+  .sound-status {
+    right: 10px;
+    top: 176px;
+    bottom: auto;
+    max-width: calc(100vw - 118px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 
   .topbar { padding: 10px 14px 4px; }
   .brand { font-size: 18px; }
@@ -1103,11 +1111,11 @@ p {
    ═══════════════════════════════════════ */
 .room-badge {
   position: fixed;
-  right: 16px;
-  top: 70px;
+  right: 20px;
+  top: 62px;
   z-index: 45;
   display: none;
-  max-width: min(60vw, 420px);
+  max-width: min(56vw, 420px);
   padding: 6px 15px;
   clip-path: polygon(8px 0, 100% 0, calc(100% - 8px) 100%, 0 100%);
   background: rgba(8, 18, 46, .88);
@@ -1157,8 +1165,13 @@ body.menu-open .rival-marker { visibility: hidden; }
 li.mine strong, li.mine span { color: #ffd65c; text-shadow: 0 0 10px rgba(255, 214, 92, .65); }
 
 @media (max-width: 850px) {
-  .room-badge { top: 132px; right: 10px; font-size: 12px; padding: 5px 12px; }
-  .impact-hud { top: 168px; }
+  .room-badge {
+    top: 140px;
+    right: 10px;
+    max-width: calc(100vw - 118px);
+    font-size: 11px;
+    padding: 5px 11px;
+  }
   .menu-row { grid-template-columns: 1fr 1fr; }
 }
 
