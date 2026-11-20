@@ -162,13 +162,18 @@ const server = http.createServer(async (request, response) => {
         });
       }
 
-      const savedLeft = (resumeId && room.leftSeats.get(resumeId)) || room.leftSeats.get(nameKey) || null;
+      let savedLeft = (resumeId && room.leftSeats.get(resumeId)) || room.leftSeats.get(nameKey) || null;
+      if (!savedLeft && room.startAt && Date.now() >= room.startAt && !room.finishAt && room.leftSeats.size > 0 && activePlayers(room).length < 2) {
+        savedLeft = Array.from(room.leftSeats.values()).pop() || null;
+      }
       if (activePlayers(room).length >= 2) {
         return sendJson(response, 409, { error: "房间已满，先让对方退出房间或等 15 秒掉线后再进。" });
       }
       const playerId = savedLeft ? savedLeft.id : Math.random().toString(36).slice(2, 12);
       if (savedLeft) {
-        room.leftSeats.delete(savedLeft.id);
+        for (const [k, seat] of room.leftSeats) {
+          if (seat && seat.id === savedLeft.id) room.leftSeats.delete(k);
+        }
         room.leftSeats.delete(nameKey);
       }
       if (!room.hostId && (action === "create" || savedLeft?.isHost)) {

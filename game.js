@@ -212,12 +212,18 @@ function clearActiveRoom() {
   try { localStorage.removeItem(ACTIVE_ROOM_STORAGE); } catch (e) {}
 }
 
+let pendingLeavePromise = null;
+
 // 手动房号：两个人输一样的号就进同一个房间，先到的人自动建房
 async function enterRaceRoom(rawCode, mode = "join") {
   const code = String(rawCode || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
   if (code.length < 3) {
     document.querySelector("#roomStatus").textContent = "先输入房间号（至少 3 位），两人输一样的号就能进同一个房间";
     return;
+  }
+  if (pendingLeavePromise) {
+    await pendingLeavePromise.catch(() => {});
+    pendingLeavePromise = null;
   }
   const savedRoom = loadActiveRoom();
   const resumePlayerId = savedRoom && savedRoom.roomCode === code ? savedRoom.playerId : "";
@@ -285,7 +291,12 @@ async function enterRaceRoom(rawCode, mode = "join") {
   if (roomPollTimer) clearInterval(roomPollTimer);
   roomPollTimer = setInterval(syncRaceRoom, 60);
   startRaceStream();
-  applyRaceStart(result);
+  if (result.resumed && Number(result.startAt) > 0 && (Number(result.serverNow) || Date.now()) >= Number(result.startAt)) {
+    applyRaceStart(result);
+    launchMultiRace();
+  } else {
+    applyRaceStart(result);
+  }
 }
 
 // 兼容旧调用点
@@ -293,8 +304,8 @@ async function connectRaceRoom(action, code = "") {
   await enterRaceRoom(code);
 }
 
-// 退出房间：释放服务器座位、断开推送、清掉本地房间状态
-async function leaveRaceRoom(silent = false) {
+// 退出房间：释放服务器座位、断开推送、可选保留重连凭证
+async function leaveRaceRoom(silent = false, keepResume = false) {
   const code = roomCode;
   const id = roomPlayerId;
   if (code && id) {
@@ -342,8 +353,10 @@ async function leaveRaceRoom(silent = false) {
   setRoomBadge("");
   updateStartButtonForRoom();
   if (!silent) {
-    clearActiveRoom();
-    document.querySelector("#roomStatus").textContent = "已退出房间，输入房间号可以重新进入";
+    if (!keepResume) {
+      clearActiveRoom();
+      document.querySelector("#roomStatus").textContent = "已退出房间，输入房间号可以重新进入";
+    }
     running = false;
   }
 }
@@ -433,13 +446,14 @@ function applyRaceStart(payload) {
   }
   const playerCount = Number(payload?.playerCount);
   const startAt = Number(payload?.startAt) || 0;
-  if (!payload || !Number.isFinite(playerCount) || playerCount < 2 || !startAt) {
+  const serverNow = Number(payload?.serverNow) || Date.now();
+  const clockOffset = serverNow - Date.now();          // 服务器时钟领先本地的毫秒数
+  const localStart = startAt - clockOffset;
+  const raceAlreadyRunning = Boolean(payload?.resumed || (startAt > 0 && Date.now() >= localStart && raceSync.launched));
+  if (!payload || !startAt || (!raceAlreadyRunning && (!Number.isFinite(playerCount) || playerCount < 2))) {
     cancelPendingRaceCountdown();
     return;
   }
-  const serverNow = Number(payload.serverNow) || Date.now();
-  const clockOffset = serverNow - Date.now();          // 服务器时钟领先本地的毫秒数
-  const localStart = startAt - clockOffset;
   // 已经发车了就忽略服务端后续的时刻变化，避免比赛被打断
   if (raceSync.armed && Date.now() > raceSync.startAt) return;
   if (raceSync.armed && Math.abs(localStart - raceSync.startAt) < 1000) return;
@@ -500,6 +514,11 @@ function launchMultiRace() {
     raceDistance = raceSync.resumeState.distance;
     carPhysics.x = raceSync.resumeState.x;
     raceSync.resumeState = null;
+    const pct = Math.min(100, (raceDistance / finishDistance) * 100);
+    const barEl = document.querySelector("#raceProgressBar");
+    const txtEl = document.querySelector("#raceProgressText");
+    if (barEl) barEl.style.width = `${pct.toFixed(1)}%`;
+    if (txtEl) txtEl.textContent = `${Math.floor(raceDistance)}m / ${finishDistance}m`;
   } else {
     carPhysics.x = -ROAD_WIDTH / 2 + (playerLaneIndex + 0.5) * LANE_WIDTH;
   }
@@ -669,23 +688,24 @@ function updateRivalMarker(rel) {
   el.style.bottom = ahead ? "auto" : "18%";
 }
 
-// 每一帧：用对手上报的里程 + 速度外推，画出真实的相对运动
+// 每一帧：用对手上报的里程 + 速度外推，画出真实的相对运动（不与真人发生碰撞）
 function syncRemoteCarVisual() {
   const o = raceSync.other;
   if (!o || !remoteCar) return;
-  const elapsed = Math.max(0, Math.min(0.25, (Date.now() - o.at) / 1000));
+  const elapsed = Math.max(0, Math.min(0.4, (Date.now() - o.at) / 1000));
   // 上报速度单位换算成实际前进：speed * 90 / 3.6 米每秒
   const projected = o.distance + (o.speed * 90 / 3.6) * elapsed;
-  const rel = projected - raceDistance;             // 真实差距：正整数=他领先，负数=我领先
-  // 1 米就是 1 米，不做任何夹取/压缩，否则对手会被"钉"在你身边看起来一起走
+  const rel = projected - raceDistance;             // 真实差距：正数=对手领先，负数=己方领先
+  // 1 米就是 1 米，不做任何夹取/压缩，保证真实相对速度与超车感
   const targetZ = -rel;
   const targetX = o.x + trackCurve(projected);
-  remoteCar.group.position.z += (targetZ - remoteCar.group.position.z) * 0.6;
-  remoteCar.group.position.x += (targetX - remoteCar.group.position.x) * 0.6;
+  remoteCar.group.position.z += (targetZ - remoteCar.group.position.z) * 0.45;
+  remoteCar.group.position.x += (targetX - remoteCar.group.position.x) * 0.45;
   const otherSlope = (trackCurve(projected + 4) - trackCurve(projected - 4)) / 8;
   remoteCar.group.rotation.y = -o.heading - Math.atan(otherSlope);
   remoteCar.wheels.forEach(w => {
-    w.spin.rotation.x += Math.max(0.05, o.speed) * 0.65;
+    w.spin.rotation.x += o.speed * 0.75;
+    if (w.isFront) w.steer.rotation.y = -o.heading * 1.4;
   });
   // 拉开太远就干脆不画（交给屏幕提示条和小地图显示）
   remoteCar.group.visible = Math.abs(rel) < 420;
@@ -1068,19 +1088,37 @@ function triggerHaptic(durationOrPattern = 200) {
 // THREE.JS 3D 渲染与场景系统
 // ═══════════════════════════════════════
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.1, 1000);
 const isMobileDevice = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.1, isMobileDevice ? 460 : 1000);
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: !isMobileDevice, powerPreference: "high-performance" });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, isMobileDevice ? 1.15 : 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, isMobileDevice ? 1.0 : 2));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.25;
 renderer.shadowMap.enabled = !isMobileDevice;   // 手机端关阴影，帧率优先
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
+let cameraBank = 0;
+function getCameraFraming() {
+  const aspect = Math.max(0.35, window.innerWidth / Math.max(1, window.innerHeight));
+  // 竖屏手机适度放宽视野并后撤拉高镜头，保证三车道、护栏与风景清晰可见，且车位于操作区上方
+  const portraitFactor = aspect < 1 ? Math.min(1, (1 - aspect) / 0.56) : 0;
+  return {
+    aspect,
+    portraitFactor,
+    baseFov: 58 + portraitFactor * 18,
+    baseY: 3.5 + portraitFactor * 0.72,
+    baseZ: 6.0 + portraitFactor * 2.9,
+    lookY: 1.1 + portraitFactor * 0.42
+  };
+}
+
 // 菜单阶段也把镜头放在车后视角，避免开局前对着地面
-camera.position.set(0, 3.5, 6);
-camera.lookAt(0, 1.1, -16);
+const initCamFraming = getCameraFraming();
+camera.fov = initCamFraming.baseFov;
+camera.updateProjectionMatrix();
+camera.position.set(0, initCamFraming.baseY, initCamFraming.baseZ);
+camera.lookAt(0, initCamFraming.lookY, -16);
 
 const ambientLight = new THREE.AmbientLight(0xffffff, 1.2);
 scene.add(ambientLight);
@@ -1811,14 +1849,27 @@ const CAR_ASSETS = (() => {
   };
 })();
 
+const TRAFFIC_PAINT_MATS = new Map();
+function getTrafficPaintMat(colorHex) {
+  let m = TRAFFIC_PAINT_MATS.get(colorHex);
+  if (!m) {
+    m = new THREE.MeshStandardMaterial({
+      color: colorHex,
+      roughness: 0.25,
+      metalness: 0.65
+    });
+    TRAFFIC_PAINT_MATS.set(colorHex, m);
+  }
+  return m;
+}
+
 function createTeslaCar(isPlayer = true, colorHex = 0xffffff) {
   const carGroup = new THREE.Group();
+  const compactAI = !isPlayer && isMobileDevice;
 
-  const paintMat = new THREE.MeshStandardMaterial({
-    color: colorHex,
-    roughness: 0.22,
-    metalness: 0.72
-  });
+  const paintMat = isPlayer
+    ? new THREE.MeshStandardMaterial({ color: colorHex, roughness: 0.22, metalness: 0.72 })
+    : getTrafficPaintMat(colorHex);
   carGroup.userData.paintMaterial = paintMat;
 
   // 1. 雕刻感流线三厢车身
@@ -1848,19 +1899,21 @@ function createTeslaCar(isPlayer = true, colorHex = 0xffffff) {
   diffuser.position.set(0, 0.3, 0.96);
   carGroup.add(diffuser);
 
-  // 车窗 B 柱分隔 + 车顶压线 + 轮眉包边
-  [-1, 1].forEach(side => {
-    const bPillar = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
-    bPillar.scale.set(0.04, 0.44, 0.14);
-    bPillar.position.set(side * 0.77, 1.07, -1.25);
-    carGroup.add(bPillar);
+  // 车窗 B 柱分隔 + 轮眉包边（手机 AI 车简化微件降低绘制调用）
+  if (!compactAI) {
+    [-1, 1].forEach(side => {
+      const bPillar = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
+      bPillar.scale.set(0.04, 0.44, 0.14);
+      bPillar.position.set(side * 0.77, 1.07, -1.25);
+      carGroup.add(bPillar);
 
-    [0.0, -2.7].forEach(wz => {
-      const arch = new THREE.Mesh(CAR_ASSETS.archGeo, CAR_ASSETS.trimMat);
-      arch.position.set(side * 0.96, 0.42, wz);
-      carGroup.add(arch);
+      [0.0, -2.7].forEach(wz => {
+        const arch = new THREE.Mesh(CAR_ASSETS.archGeo, CAR_ASSETS.trimMat);
+        arch.position.set(side * 0.96, 0.42, wz);
+        carGroup.add(arch);
+      });
     });
-  });
+  }
 
   // 4. 外后视镜 + 隐藏式门把手 + 前矩阵 LED 大灯
   [-1, 1].forEach(side => {
@@ -1869,15 +1922,17 @@ function createTeslaCar(isPlayer = true, colorHex = 0xffffff) {
     mirror.position.set(side * 1.02, 0.86, -2.02);
     carGroup.add(mirror);
 
-    const handleF = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
-    handleF.scale.set(0.03, 0.04, 0.22);
-    handleF.position.set(side * 0.96, 0.72, -1.55);
-    carGroup.add(handleF);
+    if (!compactAI) {
+      const handleF = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
+      handleF.scale.set(0.03, 0.04, 0.22);
+      handleF.position.set(side * 0.96, 0.72, -1.55);
+      carGroup.add(handleF);
 
-    const handleR = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
-    handleR.scale.set(0.03, 0.04, 0.22);
-    handleR.position.set(side * 0.96, 0.72, -0.58);
-    carGroup.add(handleR);
+      const handleR = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
+      handleR.scale.set(0.03, 0.04, 0.22);
+      handleR.position.set(side * 0.96, 0.72, -0.58);
+      carGroup.add(handleR);
+    }
 
     const hl = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.hlMat);
     hl.scale.set(0.36, 0.075, 0.1);
@@ -1914,17 +1969,20 @@ function createTeslaCar(isPlayer = true, colorHex = 0xffffff) {
     spinGroup.add(new THREE.Mesh(CAR_ASSETS.tireGeo, CAR_ASSETS.tireMat));
     spinGroup.add(new THREE.Mesh(CAR_ASSETS.rimGeo, CAR_ASSETS.hubMat));
 
-    // 刹车盘 + 红色运动卡钳
-    const disc = new THREE.Mesh(CAR_ASSETS.discGeo, CAR_ASSETS.rimMat);
-    spinGroup.add(disc);
-    const caliper = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.caliperMat);
-    caliper.scale.set(0.12, 0.16, 0.12);
-    caliper.position.set(pos[0] > 0 ? -0.06 : 0.06, 0.12, 0.14);
-    steerGroup.add(caliper);
+    if (!compactAI) {
+      // 刹车盘 + 红色运动卡钳
+      const disc = new THREE.Mesh(CAR_ASSETS.discGeo, CAR_ASSETS.rimMat);
+      spinGroup.add(disc);
+      const caliper = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.caliperMat);
+      caliper.scale.set(0.12, 0.16, 0.12);
+      caliper.position.set(pos[0] > 0 ? -0.06 : 0.06, 0.12, 0.14);
+      steerGroup.add(caliper);
+    }
 
-    for (let s = 0; s < 5; s++) {
+    const spokeCount = compactAI ? 2 : 5;
+    for (let s = 0; s < spokeCount; s++) {
       const spoke = new THREE.Mesh(CAR_ASSETS.spokeGeo, CAR_ASSETS.rimMat);
-      spoke.rotation.x = (s / 5) * Math.PI;
+      spoke.rotation.x = (s / spokeCount) * Math.PI;
       spinGroup.add(spoke);
     }
     spinGroup.add(new THREE.Mesh(CAR_ASSETS.hubGeo, CAR_ASSETS.rimMat));
@@ -2187,10 +2245,17 @@ function spawnCoin() {
 // 粒子系统
 const particles = [];
 const pGeo = new THREE.SphereGeometry(0.12, 6, 6);
+const SPARK_MATS = new Map();
 
 function createSpark(x, y, z, colorHex, count = 12) {
-  for (let i = 0; i < count; i++) {
-    const pMesh = new THREE.Mesh(pGeo, new THREE.MeshBasicMaterial({ color: colorHex }));
+  let mat = SPARK_MATS.get(colorHex);
+  if (!mat) {
+    mat = new THREE.MeshBasicMaterial({ color: colorHex });
+    SPARK_MATS.set(colorHex, mat);
+  }
+  const actualCount = isMobileDevice ? Math.max(5, Math.ceil(count * 0.55)) : count;
+  for (let i = 0; i < actualCount; i++) {
+    const pMesh = new THREE.Mesh(pGeo, mat);
     pMesh.position.set(x, y, z);
     scene.add(pMesh);
     particles.push({
@@ -2246,12 +2311,28 @@ function applyTheme(themeKey) {
   roadSegments.length = 0;
   sceneryObjects.length = 0;
 
+  // 所有路段共用同一批几何体与材质，显著减少手机端显存占用与编译开销
+  const segmentAssets = {
+    terrainGeo: new THREE.PlaneGeometry(280, ROAD_SEGMENT_LENGTH),
+    terrainMat: new THREE.MeshStandardMaterial({ color: theme.terrainColor, roughness: 0.9 }),
+    roadGeo: new THREE.PlaneGeometry(ROAD_WIDTH, ROAD_SEGMENT_LENGTH),
+    roadMat: new THREE.MeshStandardMaterial({ color: theme.roadColor, roughness: theme.roadRoughness, metalness: 0.25 }),
+    stripeGeo: new THREE.PlaneGeometry(0.24, 6),
+    stripeMat: new THREE.MeshBasicMaterial({ color: theme.stripeColor }),
+    railGeo: new THREE.BoxGeometry(0.35, 0.65, ROAD_SEGMENT_LENGTH),
+    railMat: new THREE.MeshStandardMaterial({ color: theme.railColor, roughness: 0.7 }),
+    stemGeo: new THREE.CylinderGeometry(0.055, 0.08, 0.8, 8),
+    stemMat: new THREE.MeshStandardMaterial({ color: 0xe8edf2, roughness: 0.55 }),
+    reflectorGeo: new THREE.BoxGeometry(0.18, 0.16, 0.05)
+  };
+
   for (let i = 0; i < ROAD_SEGMENTS; i++) {
-    buildRoadSegment(-i * ROAD_SEGMENT_LENGTH, theme);
+    buildRoadSegment(-i * ROAD_SEGMENT_LENGTH, theme, segmentAssets);
   }
 
-  // 两侧丰富大自然元素 (小牛、小鹿、风车、木屋、树木) - 密集沿公路两侧排布
-  const SCENERY_COUNT = 150;
+  // 两侧丰富大自然元素 (小牛、小鹿、风车、木屋、树木) - 手机端适量降密保流畅，电脑端满密度展示
+  const SCENERY_COUNT = isMobileDevice ? 84 : 150;
+  const sceneryStepZ = 540 / SCENERY_COUNT;
   for (let i = 0; i < SCENERY_COUNT; i++) {
     let item;
     const rand = Math.random();
@@ -2287,7 +2368,7 @@ function applyTheme(themeKey) {
     const side = i % 2 === 0 ? -1 : 1;
     // 紧贴公路护栏外侧！路宽20，半宽10，护栏在10.2，景物在 11.2 到 15.5 之间，驾驶视角极为清晰
     const offset = ROAD_WIDTH / 2 + 1.2 + Math.random() * 4.0;
-    const zPos = - (i * 3.6);
+    const zPos = -(i * sceneryStepZ);
     item.position.set(side * offset, 0, zPos);
     item.userData.trackX = item.position.x;
     item.userData = {
@@ -2301,48 +2382,41 @@ function applyTheme(themeKey) {
     item.rotation.y = (side === 1 ? -Math.PI / 2 : Math.PI / 2) + (Math.random() - 0.5) * 0.4;
 
     worldGroup.add(item);
-    item.traverse(node => {
-      if (node.isMesh) {
-        node.castShadow = true;
-        node.receiveShadow = true;
-      }
-    });
+    if (!isMobileDevice) {
+      item.traverse(node => {
+        if (node.isMesh) {
+          node.castShadow = true;
+          node.receiveShadow = true;
+        }
+      });
+    }
     sceneryObjects.push(item);
   }
 }
 
-function buildRoadSegment(zOffset, theme) {
+function buildRoadSegment(zOffset, theme, assets) {
   const seg = new THREE.Group();
   seg.position.z = zOffset;
 
   // 大地
-  const terrain = new THREE.Mesh(
-    new THREE.PlaneGeometry(280, ROAD_SEGMENT_LENGTH),
-    new THREE.MeshStandardMaterial({ color: theme.terrainColor, roughness: 0.9 })
-  );
+  const terrain = new THREE.Mesh(assets.terrainGeo, assets.terrainMat);
   terrain.rotation.x = -Math.PI / 2;
   terrain.position.y = -0.05;
-  terrain.receiveShadow = true;
+  if (!isMobileDevice) terrain.receiveShadow = true;
   seg.add(terrain);
 
   // 沥青公路
-  const road = new THREE.Mesh(
-    new THREE.PlaneGeometry(ROAD_WIDTH, ROAD_SEGMENT_LENGTH),
-    new THREE.MeshStandardMaterial({ color: theme.roadColor, roughness: theme.roadRoughness, metalness: 0.25 })
-  );
+  const road = new THREE.Mesh(assets.roadGeo, assets.roadMat);
   road.rotation.x = -Math.PI / 2;
   road.position.y = 0.02;
-  road.receiveShadow = true;
+  if (!isMobileDevice) road.receiveShadow = true;
   seg.add(road);
 
   // 道路白线
   for (let i = 1; i < LANE_COUNT; i++) {
     const laneX = -ROAD_WIDTH / 2 + i * LANE_WIDTH;
     for (let s = 0; s < 2; s++) {
-      const stripe = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.24, 6),
-        new THREE.MeshBasicMaterial({ color: theme.stripeColor })
-      );
+      const stripe = new THREE.Mesh(assets.stripeGeo, assets.stripeMat);
       stripe.rotation.x = -Math.PI / 2;
       stripe.position.set(laneX, 0.04, -ROAD_SEGMENT_LENGTH / 2 + s * 14 + 3);
       seg.add(stripe);
@@ -2350,40 +2424,29 @@ function buildRoadSegment(zOffset, theme) {
   }
 
   // 真实原木护栏
-  const railGeo = new THREE.BoxGeometry(0.35, 0.65, ROAD_SEGMENT_LENGTH);
-  const railMat = new THREE.MeshStandardMaterial({ color: theme.railColor, roughness: 0.7 });
-
-  const railL = new THREE.Mesh(railGeo, railMat);
+  const railL = new THREE.Mesh(assets.railGeo, assets.railMat);
   railL.position.set(-ROAD_WIDTH / 2 - 0.2, 0.35, 0);
   seg.add(railL);
-  railL.castShadow = true;
+  if (!isMobileDevice) railL.castShadow = true;
 
-  const railR = new THREE.Mesh(railGeo, railMat);
+  const railR = new THREE.Mesh(assets.railGeo, assets.railMat);
   railR.position.set(ROAD_WIDTH / 2 + 0.2, 0.35, 0);
   seg.add(railR);
-  railR.castShadow = true;
+  if (!isMobileDevice) railR.castShadow = true;
 
   // 连续的道路反光柱：强化道路边界、速度参照和两侧装饰层次。
   for (let marker = 0; marker < Math.floor(ROAD_SEGMENT_LENGTH / 24); marker++) {
     const z = -ROAD_SEGMENT_LENGTH / 2 + marker * 24 + 10;
     [-1, 1].forEach(side => {
       const post = new THREE.Group();
-      const stem = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.055, 0.08, 0.8, 8),
-        new THREE.MeshStandardMaterial({ color: 0xe8edf2, roughness: 0.55 })
-      );
+      const stem = new THREE.Mesh(assets.stemGeo, assets.stemMat);
       stem.position.y = 0.48;
+      if (!isMobileDevice) stem.castShadow = true;
       post.add(stem);
-      const reflector = new THREE.Mesh(
-        new THREE.BoxGeometry(0.18, 0.16, 0.05),
-        new THREE.MeshBasicMaterial({ color: theme.stripeColor })
-      );
+      const reflector = new THREE.Mesh(assets.reflectorGeo, assets.stripeMat);
       reflector.position.set(-side * 0.08, 0.7, -0.05);
       post.add(reflector);
       post.position.set(side * (ROAD_WIDTH / 2 + 0.72), 0, z);
-      post.traverse(node => {
-        if (node.isMesh) node.castShadow = true;
-      });
       seg.add(post);
     });
   }
@@ -2569,8 +2632,15 @@ function exitCurrentGame() {
   baseSpeed = 0;
   currentSpeed = 0;
   boosting = false;
-  if (roomCode) {
-    leaveRaceRoom(false).catch(() => {});
+  const prevRoomCode = roomCode;
+  if (prevRoomCode) {
+    pendingLeavePromise = leaveRaceRoom(false, true).catch(() => {});
+    const input = document.querySelector("#roomCodeInput");
+    if (input && !input.value) input.value = prevRoomCode;
+    const statusEl = document.querySelector("#roomStatus");
+    if (statusEl) {
+      statusEl.textContent = `已暂停退出房间 ${prevRoomCode} · 点「进入」即可从原进度继续`;
+    }
   }
   const rivalEl = document.querySelector("#rivalMarker");
   if (rivalEl) rivalEl.style.display = "none";
@@ -2908,6 +2978,9 @@ function update() {
     if (item.position.z > 25) {
       item.position.z -= 540;
     }
+    const vis = item.position.z > -410 && item.position.z < 24;
+    item.visible = vis;
+    if (!vis) return;
     item.position.x = item.userData.trackX + trackCurve(raceDistance - item.position.z);
     // 风吹植被和装饰物轻摆，避免所有景物像静态积木。
     const sway = item.userData && item.userData.swayPhase;
@@ -2940,13 +3013,17 @@ function update() {
     enemy.group.position.z += moveZ - enemy.speed * 1.0;
     const enemyRoadDistance = raceDistance - enemy.group.position.z;
     enemy.group.position.x = enemy.laneX + trackCurve(enemyRoadDistance);
-    const enemyRoadSlope = (trackCurve(enemyRoadDistance + 4) - trackCurve(enemyRoadDistance - 4)) / 8;
-    enemy.group.rotation.y = -Math.atan(enemyRoadSlope);
-    enemy.group.position.y = Math.sin(frame * 0.11 + i) * 0.01;
-    enemy.group.rotation.z = Math.sin(frame * 0.08 + i) * 0.006;
-    enemy.wheels.forEach(w => {
-      w.spin.rotation.x += 0.35;
-    });
+    const enemyVisible = enemy.group.position.z > -420 && enemy.group.position.z < 24;
+    enemy.group.visible = enemyVisible;
+    if (enemyVisible) {
+      const enemyRoadSlope = (trackCurve(enemyRoadDistance + 4) - trackCurve(enemyRoadDistance - 4)) / 8;
+      enemy.group.rotation.y = -Math.atan(enemyRoadSlope);
+      enemy.group.position.y = Math.sin(frame * 0.11 + i) * 0.01;
+      enemy.group.rotation.z = Math.sin(frame * 0.08 + i) * 0.006;
+      enemy.wheels.forEach(w => {
+        w.spin.rotation.x += 0.35;
+      });
+    }
 
     // 按 2.4m 车宽、4.9m 车长做旋转矩形碰撞；留有真实车身间隙即可通过。
     const ePos = enemy.group.position;
@@ -2962,19 +3039,6 @@ function update() {
     if (enemy.group.position.z > 25 || enemy.group.position.z < -650) {
       scene.remove(enemy.group);
       traffic.splice(i, 1);
-    }
-  }
-
-  // 双方联机车辆同世界实体碰撞与减速（不穿过对手）
-  if (roomCode && remoteCar && remoteCar.group.visible && raceSync.other) {
-    if (vehiclesOverlap(player, remoteCar) && registerPlayerImpact(remoteCar, Date.now())) {
-      baseSpeed = reduceSpeedAfterImpact(baseSpeed);
-      const pushDir = player.group.position.x >= remoteCar.group.position.x ? 1 : -1;
-      carPhysics.x = Math.max(-(ROAD_WIDTH / 2 - 1.8), Math.min(ROAD_WIDTH / 2 - 1.8, carPhysics.x + pushDir * 0.45));
-      showImpact("双车擦碰 · 减速", remoteCar.group.position.x, remoteCar.group.position.z, true);
-      sound.playCrash();
-      triggerHaptic([60, 40, 80]);
-      cameraTrauma = Math.min(1, cameraTrauma + 0.55);
     }
   }
 
@@ -3016,17 +3080,18 @@ function update() {
     }
   }
 
-  // 8. 第三人称跟随相机：镜头始终锁在车辆正后方，不再被弯道/横向漂移带偏
+  // 8. 动态第三人称追焦相机：弹性滞后跟随 + 弯道/转向预瞄 + 微侧倾，竖屏手机自动拓宽视野并将车置于合理低位
   syncRemoteCarVisual();
-  if (frame % 4 === 0) drawMinimap();
+  if (frame % (isMobileDevice ? 6 : 4) === 0) drawMinimap();
+  const camFraming = getCameraFraming();
   const carWorldX = carPhysics.x + trackCurve(raceDistance);
-  const targetCamX = carWorldX;
-  // 速度感：跑得越快镜头微微拉远、抬高，车在画面里会有一个"往前顶"的过程
+  const lookSlope = (trackCurve(raceDistance + 25) - trackCurve(raceDistance)) / 25;
+  const targetCamX = carWorldX - carPhysics.heading * 1.15;
   const speedRatio = Math.min(1, currentSpeed / (200 / 90));
-  const targetCamY = (boosting ? 3.3 : 3.5) + speedRatio * 0.35;
-  const targetCamZ = (boosting ? 6.5 : 6.0) + speedRatio * 1.6;
+  const targetCamY = camFraming.baseY + (boosting ? -0.22 : 0) + speedRatio * 0.32;
+  const targetCamZ = camFraming.baseZ + (boosting ? 0.75 : 0) + speedRatio * 1.55;
 
-  camera.position.x += (targetCamX - camera.position.x) * 0.16;
+  camera.position.x += (targetCamX - camera.position.x) * 0.105;
   camera.position.y += (targetCamY - camera.position.y) * 0.1;
   camera.position.z += (targetCamZ - camera.position.z) * 0.1;
 
@@ -3037,13 +3102,15 @@ function update() {
     cameraTrauma = Math.max(0, cameraTrauma - 0.04);
   }
 
-  const targetFov = boosting ? 62 : 58;
-  camera.fov += (targetFov - camera.fov) * 0.02;
+  const targetFov = camFraming.baseFov + (boosting ? 5.5 : 0) + speedRatio * 2.5;
+  camera.fov += (targetFov - camera.fov) * 0.06;
   camera.updateProjectionMatrix();
 
-  // 视线永远沿赛道正前方，镜头和车一起平移，不会越开越歪
-  const lookSlope = (trackCurve(raceDistance + 25) - trackCurve(raceDistance)) / 25;
-  camera.lookAt(camera.position.x + lookSlope * 26, 1.1, -16);
+  const lookTargetX = carWorldX * 0.62 + camera.position.x * 0.38 + lookSlope * 22 + carPhysics.heading * 8.0;
+  camera.lookAt(lookTargetX, camFraming.lookY, -16);
+  const targetBank = -carPhysics.heading * 0.085 - carPhysics.roll * 0.35;
+  cameraBank += (targetBank - cameraBank) * 0.14;
+  camera.rotateZ(cameraBank);
 }
 
 // ═══════════════════════════════════════
@@ -3055,14 +3122,20 @@ let updateAccumulator = 0;
 
 function render(timestamp = performance.now()) {
   if (!previousFrameTime) previousFrameTime = timestamp;
-  // Cap catch-up after tab suspension and simulate at 60 Hz on every display.
-  const elapsed = Math.min(timestamp - previousFrameTime, 100);
+  // Cap catch-up after tab suspension and keep mobile 60Hz jitter smooth.
+  const elapsed = Math.min(timestamp - previousFrameTime, 50);
   previousFrameTime = timestamp;
   updateAccumulator += elapsed;
-  while (updateAccumulator >= FIXED_STEP_MS) {
+  if (updateAccumulator >= FIXED_STEP_MS - 1.2 && updateAccumulator < FIXED_STEP_MS) {
+    updateAccumulator = FIXED_STEP_MS;
+  }
+  let steps = 0;
+  while (updateAccumulator >= FIXED_STEP_MS && steps < 2) {
     update();
     updateAccumulator -= FIXED_STEP_MS;
+    steps += 1;
   }
+  if (updateAccumulator > FIXED_STEP_MS * 2) updateAccumulator = FIXED_STEP_MS;
   renderer.render(scene, camera);
   requestAnimationFrame(render);
 }
@@ -3277,8 +3350,15 @@ document.addEventListener("visibilitychange", () => {
 });
 
 window.addEventListener("resize", () => {
+  const f = getCameraFraming();
   camera.aspect = window.innerWidth / window.innerHeight;
+  if (!running) {
+    camera.fov = f.baseFov;
+    camera.position.set(0, f.baseY, f.baseZ);
+    camera.lookAt(0, f.lookY, -16);
+  }
   camera.updateProjectionMatrix();
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, isMobileDevice ? 1.0 : 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
