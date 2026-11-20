@@ -4384,8 +4384,9 @@ function update(dtScale = 1) {
     }
   }
 
-  // 时速上限固定 200 km/h（currentSpeed 单位换算：×90 即 km/h）
+  // 常规极速 200 km/h，开启氮气加速可暂时突破至 260 km/h（currentSpeed 单位换算：×90 即 km/h）
   const MAX_SPEED = 200 / 90;
+  const MAX_BOOST_SPEED = 260 / 90;
   if (braking) {
     // 渐进刹车减速度（约 -86 km/h/s，从高速刹停约 2~2.5 秒，拒绝一踩即定）
     baseSpeed = Math.max(0, baseSpeed - 0.016 * dtScale);
@@ -4397,9 +4398,9 @@ function update(dtScale = 1) {
     baseSpeed = Math.max(0, baseSpeed - 0.0055 * dtScale);
     if (baseSpeed < 0.008) baseSpeed = 0;
   }
-  const targetBoostAdd = boosting ? 0.35 : 0;
-  carPhysics.boostSpeed += (targetBoostAdd - carPhysics.boostSpeed) * expEase(boosting ? 0.14 : 0.06);
-  currentSpeed = Math.min(MAX_SPEED, baseSpeed + carPhysics.boostSpeed);
+  const targetBoostAdd = boosting ? (60 / 90) : 0;
+  carPhysics.boostSpeed += (targetBoostAdd - carPhysics.boostSpeed) * expEase(boosting ? 0.14 : 0.055);
+  currentSpeed = Math.min(MAX_BOOST_SPEED, baseSpeed + carPhysics.boostSpeed);
   const stepMeters = ((currentSpeed * 90) / 3.6 / 60) * dtScale;
   raceDistance += stepMeters;
   const progress = Math.min(1, raceDistance / finishDistance);
