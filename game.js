@@ -112,7 +112,11 @@ function startKeyCapture(action) {
 function setMenuVisible(visible) {
   overlay.classList.toggle("hidden", !visible);
   document.body.classList.toggle("menu-open", visible);
-  if (visible) releaseAllInputs();
+  if (visible) {
+    document.body.classList.remove("boosting-fx");
+    if (player.group.userData.nitroFlames) player.group.userData.nitroFlames.visible = false;
+    releaseAllInputs();
+  }
 }
 
 let best = Number(localStorage.getItem("neonRushBest") || 0);
@@ -1686,6 +1690,9 @@ const CAR_ASSETS = (() => {
   const spokeGeo = new THREE.BoxGeometry(0.34, 0.48, 0.06);
   const hubGeo = new THREE.CylinderGeometry(0.09, 0.09, 0.35, 10);
   hubGeo.rotateZ(Math.PI / 2);
+  const flameGeo = new THREE.ConeGeometry(0.18, 1.45, 10);
+  flameGeo.rotateX(Math.PI / 2);
+  flameGeo.translate(0, 0, 0.72);
 
   return {
     bodyGeo,
@@ -1694,6 +1701,7 @@ const CAR_ASSETS = (() => {
     rimGeo,
     spokeGeo,
     hubGeo,
+    flameGeo,
     box: new THREE.BoxGeometry(1, 1, 1),
     glassMat: new THREE.MeshStandardMaterial({ color: 0x0b1322, roughness: 0.08, metalness: 0.9 }),
     trimMat: new THREE.MeshStandardMaterial({ color: 0x1d2026, roughness: 0.65, metalness: 0.4 }),
@@ -1702,7 +1710,10 @@ const CAR_ASSETS = (() => {
     hubMat: new THREE.MeshStandardMaterial({ color: 0x2a2f38, metalness: 0.8, roughness: 0.35 }),
     hlMat: new THREE.MeshBasicMaterial({ color: 0xf4fbff }),
     tailMat: new THREE.MeshBasicMaterial({ color: 0xff2238 }),
-    plateMat: new THREE.MeshBasicMaterial({ color: 0xd9ecff })
+    plateMat: new THREE.MeshBasicMaterial({ color: 0xd9ecff }),
+    flameOuterMat: new THREE.MeshBasicMaterial({ color: 0x38e8ff, transparent: true, opacity: 0.8 }),
+    flameInnerMat: new THREE.MeshBasicMaterial({ color: 0xe6ffff, transparent: true, opacity: 0.96 }),
+    nitroSparkMat: new THREE.MeshBasicMaterial({ color: 0x5ceeff })
   };
 })();
 
@@ -1808,6 +1819,25 @@ function createTeslaCar(isPlayer = true, colorHex = 0xffffff) {
       node.receiveShadow = true;
     }
   });
+
+  if (isPlayer) {
+    const nitroFlames = new THREE.Group();
+    [-0.52, 0.52].forEach(nx => {
+      const nozzle = new THREE.Group();
+      nozzle.position.set(nx, 0.29, 1.0);
+
+      const outer = new THREE.Mesh(CAR_ASSETS.flameGeo, CAR_ASSETS.flameOuterMat);
+      const inner = new THREE.Mesh(CAR_ASSETS.flameGeo, CAR_ASSETS.flameInnerMat);
+      inner.scale.set(0.55, 0.55, 0.68);
+
+      nozzle.add(outer);
+      nozzle.add(inner);
+      nitroFlames.add(nozzle);
+    });
+    nitroFlames.visible = false;
+    carGroup.add(nitroFlames);
+    carGroup.userData.nitroFlames = nitroFlames;
+  }
 
   return { group: carGroup, wheels };
 }
@@ -2542,6 +2572,33 @@ function update() {
   }
   boosting = wantsBoost;
   nitro = boosting ? Math.max(0, nitro - 0.7) : Math.min(100, nitro + 0.12);
+  document.body.classList.toggle("boosting-fx", boosting);
+  const flames = player.group.userData.nitroFlames;
+  if (flames) {
+    flames.visible = boosting;
+    if (boosting) {
+      flames.children.forEach(nozzle => {
+        const stretch = 0.85 + Math.random() * 0.85;
+        const width = 0.85 + Math.random() * 0.35;
+        nozzle.scale.set(width, width, stretch);
+      });
+      if (frame % 2 === 0) {
+        const pPos = player.group.position;
+        [-0.52, 0.52].forEach(nx => {
+          const spark = new THREE.Mesh(pGeo, CAR_ASSETS.nitroSparkMat);
+          spark.position.set(pPos.x + nx + (Math.random() - 0.5) * 0.15, 0.28 + (Math.random() - 0.5) * 0.1, pPos.z + 1.35);
+          scene.add(spark);
+          particles.push({
+            mesh: spark,
+            vx: (Math.random() - 0.5) * 0.08,
+            vy: (Math.random() - 0.3) * 0.06,
+            vz: 0.45 + Math.random() * 0.35,
+            life: 0.55
+          });
+        });
+      }
+    }
+  }
 
   // 手机与电脑默认同速；键盘油门只略微提速，避免平台间速度差异过大。
   // 时速上限固定 200 km/h（currentSpeed 单位换算：×90 即 km/h）

@@ -48,6 +48,28 @@ body.crash-flash::after {
   100% { opacity: 0; }
 }
 
+/* 氮气加速屏幕边缘速度流光特效 */
+body.boosting-fx::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 52%, rgba(56, 232, 255, 0.26) 84%, rgba(169, 92, 255, 0.42) 100%);
+  pointer-events: none;
+  z-index: 9;
+  animation: boost-pulse 0.28s ease-in-out infinite alternate;
+}
+
+@keyframes boost-pulse {
+  from { opacity: 0.7; }
+  to { opacity: 1; }
+}
+
+body.boosting-fx .controls .boost {
+  border-color: #61efff;
+  box-shadow: 0 0 28px rgba(97, 239, 255, 0.85), inset 0 0 14px rgba(169, 92, 255, 0.65);
+  transform: scale(1.04);
+}
+
 canvas {
   display: block;
   width: 100%;
