@@ -400,6 +400,16 @@ function cancelPendingRaceCountdown() {
 }
 
 function applyRaceStart(payload) {
+  if (payload) {
+    if (Number(payload.finishDistance) > 0) {
+      finishDistance = Number(payload.finishDistance);
+      const sel = document.querySelector("#raceLength");
+      if (sel) sel.value = String(finishDistance);
+    }
+    if (!raceSync.isHost && payload.theme && THEMES[payload.theme] && payload.theme !== currentTheme) {
+      applyTheme(payload.theme);
+    }
+  }
   const playerCount = Number(payload?.playerCount);
   const startAt = Number(payload?.startAt) || 0;
   if (!payload || !Number.isFinite(playerCount) || playerCount < 2 || !startAt) {
@@ -415,14 +425,6 @@ function applyRaceStart(payload) {
   raceSync.startAt = localStart;
   raceSync.armed = true;
   raceSync.launched = false;
-  if (Number(payload.finishDistance) > 0) {
-    finishDistance = Number(payload.finishDistance);
-    const sel = document.querySelector("#raceLength");
-    if (sel) sel.value = String(finishDistance);
-  }
-  if (payload.theme && THEMES[payload.theme] && payload.theme !== currentTheme) {
-    applyTheme(payload.theme);
-  }
   updateStartButtonForRoom();
   startMultiRaceCountdown();
 }
@@ -3038,6 +3040,7 @@ document.querySelectorAll(".theme-chip").forEach(chip => {
   chip.addEventListener("click", () => {
     if (roomCode && !raceSync.isHost) return;
     applyTheme(chip.dataset.theme);
+    if (roomCode && raceSync.isHost) syncRaceRoom();
   });
 });
 
@@ -3048,6 +3051,7 @@ if (quickSceneSelect) {
       return;
     }
     applyTheme(e.target.value);
+    if (roomCode && raceSync.isHost) syncRaceRoom();
   });
 }
 
