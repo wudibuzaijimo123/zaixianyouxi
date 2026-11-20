@@ -271,7 +271,11 @@ async function enterRaceRoomSerial(rawCode, mode = "join") {
       result = await api.post("/api/race/rooms", {
         action: mode === "create" ? "create" : "join",
         roomCode: code,
-        name: playerNameInput.value.trim() || "车手",
+        name: (() => {
+          const n = playerNameInput.value.trim();
+          if (n) localStorage.setItem("neonRacerName", n);
+          return n || "车手";
+        })(),
         resumePlayerId: resumePlayerId || undefined,
         // 房主（创建/接管方）决定距离、主题和难度；非房主传入会被服务端自动忽略
         finishDistance: Number(document.querySelector("#raceLength")?.value || 5000),
@@ -291,6 +295,9 @@ async function enterRaceRoomSerial(rawCode, mode = "join") {
   raceSync.myLane = Number(result.lane) || 0;
   raceSync.myColor = result.color || "#ffffff";
   raceSync.finishRemainSec = 0;
+  raceSync.raceOver = false;
+  raceSync.myResult = null;
+  updateFinishCountdownBanner();
   raceSync.myReady = Boolean(result.myReady);
   raceSync.otherReady = Boolean(result.otherReady);
   raceSync.playerCount = Number(result.playerCount) || 1;
@@ -390,6 +397,9 @@ async function leaveRaceRoom(silent = false, keepResume = false) {
   raceSync.launched = false;
   raceSync.startAt = 0;
   raceSync.finishRemainSec = 0;
+  raceSync.raceOver = false;
+  raceSync.myResult = null;
+  updateFinishCountdownBanner();
   raceSync.myReady = false;
   raceSync.otherReady = false;
   raceSync.otherInRace = false;
@@ -457,6 +467,8 @@ const raceSync = {
   countdownTimer: null,
   remoteId: "",
   finishRemainSec: 0,
+  raceOver: false,
+  myResult: null,
   isHost: false,
   myLane: 0,
   myColor: "",
@@ -651,12 +663,19 @@ function updateStartButtonForRoom() {
   }
   if (raceSync.launched && !running) {
     btn.disabled = raceSync.rematchQueued;
-    if (raceSync.rematchQueued) btn.textContent = "等待好友完成本局…";
+    if (raceSync.rematchQueued) {
+      btn.textContent = raceSync.finishRemainSec > 0
+        ? `等待对手结算（剩 ${raceSync.finishRemainSec}s）…`
+        : "正在返回准备区…";
+    } else if (raceSync.myResult) {
+      btn.textContent = "再来一局";
+    }
     return;
   }
   if (raceSync.armed && !raceSync.launched) {
+    btn.classList.add("is-ready");
     btn.disabled = true;
-    btn.textContent = "3 秒后同时发车…";
+    btn.textContent = "✓ 双方已准备 · 3 秒后发车…";
     return;
   }
   btn.disabled = false;
@@ -734,6 +753,9 @@ function returnToRoomLobby(resPayload = null, customHint = "", preservedResumeSt
   raceSync.locked = false;
   raceSync.startAt = 0;
   raceSync.finishRemainSec = 0;
+  raceSync.raceOver = false;
+  raceSync.myResult = null;
+  updateFinishCountdownBanner();
   raceSync.myReady = false;
   if (!preservedResumeState) {
     raceSync.otherReady = false;
@@ -768,6 +790,7 @@ function returnToRoomLobby(resPayload = null, customHint = "", preservedResumeSt
     : (raceSync.isHost
       ? "已在准备房间！你是房主，可随时修改主题/距离/难度，两人点「准备」后发车。"
       : "已在准备房间！房主可修改设置，双方点下方「点击准备」即可开局。");
+  startTapped = false;
   setMenuVisible(true);
   syncHostControlsLock();
   updateStartButtonForRoom();
@@ -1053,6 +1076,10 @@ function launchMultiRace(showGo = false) {
   if (raceSync.myColor && player.group.userData.paintMaterial) {
     player.group.userData.paintMaterial.color.set(raceSync.myColor);
   }
+  raceSync.raceOver = false;
+  raceSync.myResult = null;
+  raceSync.finishRemainSec = 0;
+  updateFinishCountdownBanner();
   raceSync.renderOffsetX = 0;
   running = true;
   setMenuVisible(false);
@@ -1071,6 +1098,8 @@ function launchMultiRace(showGo = false) {
   }
 }
 
+let syncFailCount = 0;
+let sseRetryTimer = null;
 let syncInFlight = false;
 async function syncRaceRoom() {
   if (!roomCode || !roomPlayerId || syncInFlight) return;
@@ -1094,8 +1123,14 @@ async function syncRaceRoom() {
     });
     applyRaceStart(posted);
     raceSync.finishRemainSec = Number(posted.finishRemainSec) || 0;
+    raceSync.raceOver = Boolean(posted.raceOver);
     setRacePaused(Boolean(posted.paused), posted.pausedReason || "");
-    if (posted.raceOver) forceEndRace();
+    updateFinishCountdownBanner();
+    if (posted.raceOver && running) forceEndRace();
+    if (roomCode && raceSync.launched && !running && raceSync.myResult) {
+      renderPostRaceResultCard();
+      updateStartButtonForRoom();
+    }
     // 只接受服务端发来的统一起跑时刻；客户端不再自行启动倒计时。
     // 服务端在一次 POST 里就带回对手，省掉每帧一次的 GET（手机端明显更流畅）
     let other = (posted.players || [])[0];
@@ -1133,13 +1168,17 @@ async function syncRaceRoom() {
       updateRoomLobbyStatus(posted.paused ? `房间 ${roomCode} · ${posted.pausedReason || "已暂停，等待对手重进房间…"}` : "");
       return;
     }
+    syncFailCount = 0;
     raceSync.remoteId = other.id;
     updateRemoteCar(other);
   } catch (error) {
-    // 断线不让人干等：自动重连同一个房间号
-    document.querySelector("#roomStatus").textContent = "连接中断，正在自动重连…";
-    setRoomBadge(roomCode, true, "重连中…");
-    scheduleReconnect();
+    syncFailCount++;
+    // 仅在房间确已失效(404)或连续多次断连时才走整房重连，避免单次网络抖动踢掉当前赛局/结算单
+    if ((error && error.status === 404) || syncFailCount >= 6) {
+      document.querySelector("#roomStatus").textContent = "连接中断，正在自动重连…";
+      setRoomBadge(roomCode, true, "重连中…");
+      scheduleReconnect();
+    }
   } finally {
     syncInFlight = false;
   }
@@ -1148,7 +1187,7 @@ async function syncRaceRoom() {
 // 断线自动重连（保留原房间号）
 let reconnectTimer = null;
 function scheduleReconnect() {
-  if (reconnectTimer || !roomCode) return;
+  if (reconnectTimer || !roomCode || raceSync.myResult) return;
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = null;
     const code = roomCode;
@@ -1338,8 +1377,10 @@ function startRaceStream() {
       if (!data) return;
       applyRaceStart(data);
       raceSync.finishRemainSec = Number(data.finishRemainSec) || 0;
+      raceSync.raceOver = Boolean(data.raceOver);
       setRacePaused(Boolean(data.paused), data.pausedReason || "");
-      if (data.raceOver) forceEndRace();
+      updateFinishCountdownBanner();
+      if (data.raceOver && running) forceEndRace();
       const other = (data.players || [])[0];
       if (other) {
         updateRemoteCar(other);
@@ -1348,12 +1389,20 @@ function startRaceStream() {
         raceSync.remoteId = "";
         if (remoteCar) remoteCar.group.visible = false;
       }
+      if (roomCode && raceSync.launched && !running && raceSync.myResult) {
+        renderPostRaceResultCard();
+        updateStartButtonForRoom();
+      }
     };
     raceStream.onerror = () => {
-      // SSE 断了就关掉，交给轮询 + 自动重连兜底
+      // SSE 抖动断开只静默重连推送流，绝不调用 leaveRaceRoom 踢掉当前对局/结算单（期间 60ms 轮询持续无缝兜底）
       try { raceStream.close(); } catch (error) { /* ignore */ }
       raceStream = null;
-      scheduleReconnect();
+      if (sseRetryTimer) clearTimeout(sseRetryTimer);
+      sseRetryTimer = setTimeout(() => {
+        sseRetryTimer = null;
+        if (roomCode && roomPlayerId && !raceStream) startRaceStream();
+      }, 2500);
     };
   } catch (error) {
     raceStream = null;
@@ -3886,6 +3935,9 @@ function resetGame() {
   frame = 0;
   raceDistance = 0;
   raceSync.finishRemainSec = 0;
+  raceSync.raceOver = false;
+  raceSync.myResult = null;
+  updateFinishCountdownBanner();
   finishDistance = Number(document.querySelector("#raceLength")?.value || 5000);
   document.querySelector("#raceProgressBar").style.width = "0%";
   document.querySelector("#raceProgressText").textContent = `0 / ${finishDistance} m`;
@@ -3976,82 +4028,204 @@ function startGame() {
   triggerHaptic(40);
 }
 
+let lastFinishBannerText = "";
+function updateFinishCountdownBanner() {
+  let el = document.querySelector("#finishCountdownBanner");
+  const show = Boolean(roomCode && running && raceSync.other?.finished && raceSync.finishRemainSec > 0);
+  if (!show) {
+    if (el && el.style.display !== "none") el.style.display = "none";
+    lastFinishBannerText = "";
+    return;
+  }
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "finishCountdownBanner";
+    el.className = "finish-countdown-banner";
+    document.body.appendChild(el);
+  }
+  const rivalName = String(raceSync.other?.name || "对手").trim().slice(0, 10) || "对手";
+  const text = `🏁 ${rivalName} 已冲线！剩余 ${raceSync.finishRemainSec} 秒自动结束`;
+  if (text !== lastFinishBannerText) {
+    lastFinishBannerText = text;
+    el.textContent = text;
+  }
+  el.style.display = "block";
+}
+
+let lastResultCardHtml = "";
+function renderPostRaceResultCard() {
+  if (!roomCode || !raceSync.myResult) return;
+  const mine = raceSync.myResult;
+  const other = raceSync.other;
+  const myName = (playerNameInput?.value.trim() || playerName || localStorage.getItem("neonRacerName") || "我").slice(0, 10);
+  const otherName = other ? (String(other.name || "对手").trim().slice(0, 10) || "对手") : "";
+  const otherFinished = Boolean(other && (other.finished || Number(other.finishTime) > 0));
+  const otherStillSprinting = Boolean(other && !otherFinished && !raceSync.raceOver && raceSync.finishRemainSec > 0);
+
+  let verdict = "";
+  if (mine.finished) {
+    if (!other) {
+      verdict = `🏆 你已完成 ${Math.floor(finishDistance / 100) / 10} km 赛道！`;
+    } else if (otherFinished) {
+      const oTime = Number(other.finishTime) || 0;
+      if (oTime > 0 && mine.time < oTime - 0.05) {
+        verdict = `🏆 冠军！你比 ${escapeHtml(otherName)} 快 ${(oTime - mine.time).toFixed(1)} 秒`;
+      } else if (oTime > 0 && mine.time > oTime + 0.05) {
+        verdict = `🥈 第 2 名 · 比 ${escapeHtml(otherName)} 慢 ${(mine.time - oTime).toFixed(1)} 秒`;
+      } else {
+        verdict = `🤝 势均力敌！与 ${escapeHtml(otherName)} 同时冲线`;
+      }
+    } else if (otherStillSprinting) {
+      verdict = `🏁 你已率先冲线！等待 ${escapeHtml(otherName)}（剩 ${raceSync.finishRemainSec}s 自动结束）`;
+    } else {
+      verdict = `🏆 冠军！你赢了（${escapeHtml(otherName)} 5 秒内未完赛）`;
+    }
+  } else {
+    verdict = `⏱ 5 秒冲刺倒计时结束 · ${otherName ? escapeHtml(otherName) + " 率先完赛" : "本局自动结算"}`;
+  }
+
+  const rows = [
+    {
+      mine: true,
+      name: myName,
+      finished: Boolean(mine.finished),
+      time: Number(mine.time) || 0,
+      speed: Number(mine.speed) || 0,
+      maxSpeed: Number(mine.maxSpeed) || 0,
+      distance: Number(mine.distance) || 0
+    }
+  ];
+  if (other) {
+    rows.push({
+      mine: false,
+      name: otherName,
+      finished: otherFinished,
+      time: Number(other.finishTime) || 0,
+      speed: Number(other.finishSpeed) || Math.round((Number(other.speed) || 0) * 90),
+      maxSpeed: 0,
+      distance: Math.round(Number(other.distance) || 0),
+      sprinting: otherStillSprinting
+    });
+  }
+  rows.sort((a, b) => {
+    if (a.finished && b.finished) return (a.time || 9999) - (b.time || 9999);
+    if (a.finished !== b.finished) return a.finished ? -1 : 1;
+    return b.distance - a.distance;
+  });
+
+  const medals = ["🥇", "🥈"];
+  const rowsHtml = rows.map((r, idx) => {
+    const rightHtml = r.finished
+      ? `<b>${formatRaceTime(r.time)}</b><br>冲线 ${r.speed} km/h`
+      : (r.sprinting
+        ? `<span class="dnf">冲刺中 ${r.distance}/${finishDistance}m</span><br>剩 ${raceSync.finishRemainSec}s`
+        : `<span class="dnf">未完赛 ${r.distance}/${finishDistance}m</span><br>${r.maxSpeed > 0 ? `最高 ${r.maxSpeed} km/h` : "5 秒超时结束"}`);
+    return (
+      `<div class="race-result-row${r.mine ? " mine" : ""}">` +
+      `<div class="race-result-left"><span class="race-result-rank">${medals[idx] || `${idx + 1}.`}</span>` +
+      `<span class="race-result-name">${escapeHtml(r.name)}${r.mine ? "（我）" : ""}</span></div>` +
+      `<div class="race-result-meta">${rightHtml}</div></div>`
+    );
+  }).join("");
+
+  const html =
+    `<div class="race-result-card">` +
+    `<div class="race-result-verdict">${verdict}</div>` +
+    rowsHtml +
+    `<div class="race-result-foot">赛道 ${Math.floor(finishDistance / 100) / 10} km · 最高速 ${mine.maxSpeed} km/h · 点击下方「再来一局」回到准备区</div>` +
+    `</div>`;
+  if (html !== lastResultCardHtml) {
+    lastResultCardHtml = html;
+    message.innerHTML = html;
+  }
+}
+
 function finishRace() {
   if (!running) return;
   running = false;
   setRacePaused(false);
+  updateFinishCountdownBanner();
   clearActiveRoom();
   const joinBtnEl = document.querySelector("#joinRoom");
   if (joinBtnEl) joinBtnEl.textContent = "进入";
   sound.stopBGM();
-  title.textContent = "冲过终点！";
+  title.textContent = "本局成绩单";
   if (!bestTime || raceTime < bestTime) {
     bestTime = raceTime;
     localStorage.setItem("racerBestTime", String(bestTime));
   }
   bestEl.textContent = formatRaceTime(bestTime);
 
-  // 用时少的赢：拿对手的冲线用时对比
-  const other = raceSync.other;
-  let verdict = roomCode ? "等待对手冲线…" : "";
-  if (other && other.finishTime) {
-    verdict = raceTime <= other.finishTime
-      ? `🏆 你赢了！比对手快 ${(other.finishTime - raceTime).toFixed(1)} 秒`
-      : `对手更快，你慢了 ${(raceTime - other.finishTime).toFixed(1)} 秒`;
-  }
   finishSpeed = Math.round(currentSpeed * 90);
-  const lines = [
-    `完成 ${Math.floor(finishDistance / 100) / 10} km 赛道！`,
-    `用时：<b style="color:#61efff;font-size:24px">${formatRaceTime(raceTime)}</b>`,
-    `冲线速度：<b>${finishSpeed} km/h</b>　最高速度：<b>${Math.round(maxSpeed)} km/h</b>`
-  ];
-  if (verdict) lines.splice(1, 0, verdict);
-  if (other && other.finishTime) {
-    lines.push(`对手用时 ${formatRaceTime(other.finishTime)}　冲线 ${other.finishSpeed || 0} km/h`);
+  if (roomCode && roomPlayerId) {
+    lastResultCardHtml = "";
+    raceSync.myResult = {
+      finished: true,
+      time: raceTime,
+      distance: finishDistance,
+      speed: finishSpeed,
+      maxSpeed: Math.round(maxSpeed)
+    };
+    renderPostRaceResultCard();
+    api.post("/api/race/state", {
+      roomCode, playerId: roomPlayerId, x: carPhysics.x,
+      heading: carPhysics.heading, speed: currentSpeed, distance: finishDistance,
+      finished: true, time: raceTime, score: Math.floor(score)
+    }).catch(() => {});
+  } else {
+    title.textContent = "冲过终点！";
+    const lines = [
+      `完成 ${Math.floor(finishDistance / 100) / 10} km 赛道！`,
+      `用时：<b style="color:#61efff;font-size:24px">${formatRaceTime(raceTime)}</b>`,
+      `冲线速度：<b>${finishSpeed} km/h</b>　最高速度：<b>${Math.round(maxSpeed)} km/h</b>`,
+      `最佳用时：${formatRaceTime(bestTime)}`
+    ];
+    message.innerHTML = lines.join("<br>");
   }
-  lines.push(`最佳用时：${formatRaceTime(bestTime)}`);
-  message.innerHTML = lines.join("<br>");
 
-  // 把用时同步上去（成绩榜 + 房间状态）
+  // 把用时同步上去（成绩榜）
   api.post("/api/scores", { name: playerName, time: raceTime })
     .then(() => loadLeaderboard())
     .catch(() => {});
-  if (roomCode && roomPlayerId) {
-    api.post("/api/race/state", {
-      roomCode, playerId: roomPlayerId, x: carPhysics.x,
-      heading: carPhysics.heading, speed: currentSpeed, distance: raceDistance,
-      finished: true, time: raceTime
-    }).catch(() => {});
-  }
   const startBtnEnd = document.querySelector("#start");
   if (startBtnEnd) {
     startBtnEnd.disabled = false;
     startBtnEnd.classList.remove("is-ready", "ready-prompt");
-    startBtnEnd.textContent = "再跑一圈";
+    startBtnEnd.textContent = roomCode ? "再来一局" : "再跑一圈";
   }
   setMenuVisible(true);
 }
 
-// 对手冲线 10 秒后你还没到终点 -> 强制结束（判负但保留成绩）
+// 第一名冲线 5 秒后未完赛 -> 自动结束并展示双方最终成绩单 + 再来一局
 function forceEndRace() {
   if (!running) return;
   running = false;
   setRacePaused(false);
+  raceSync.raceOver = true;
+  raceSync.finishRemainSec = 0;
+  updateFinishCountdownBanner();
   clearActiveRoom();
   const joinBtnEl = document.querySelector("#joinRoom");
   if (joinBtnEl) joinBtnEl.textContent = "进入";
   sound.stopBGM();
-  const other = raceSync.other;
-  title.textContent = "比赛结束";
-  const lines = [
-    "对手已经冲线，你没能在他冲线后 10 秒内到达终点。",
-    `你的进度：${Math.round(raceDistance)} / ${finishDistance} m　用时：${formatRaceTime(raceTime)}`,
-    `当前速度：${Math.round(currentSpeed * 90)} km/h　最高速度：${Math.round(maxSpeed)} km/h`
-  ];
-  if (other && other.finishTime) {
-    lines.splice(1, 0, `对手用时 ${formatRaceTime(other.finishTime)}　冲线 ${other.finishSpeed || 0} km/h`);
+  title.textContent = "本局成绩单";
+  lastResultCardHtml = "";
+  raceSync.myResult = {
+    finished: false,
+    timedOut: true,
+    time: raceTime,
+    distance: Math.round(raceDistance),
+    speed: Math.round(currentSpeed * 90),
+    maxSpeed: Math.round(maxSpeed)
+  };
+  renderPostRaceResultCard();
+  if (roomCode && roomPlayerId) {
+    api.post("/api/race/state", {
+      roomCode, playerId: roomPlayerId, x: carPhysics.x,
+      heading: carPhysics.heading, speed: currentSpeed, distance: raceDistance,
+      finished: false, time: raceTime, score: Math.floor(score)
+    }).catch(() => {});
   }
-  message.innerHTML = lines.join("<br>");
   const startBtnEnd = document.querySelector("#start");
   if (startBtnEnd) {
     startBtnEnd.disabled = false;
@@ -4736,6 +4910,7 @@ function setServerState(online) {
 }
 
 function renderRoomLiveRanking() {
+  document.body.classList.toggle("in-online-room", Boolean(roomCode));
   if (!leaderboardList) return;
   const titleEl = document.querySelector("#leaderboardTitle");
   if (!roomCode) {
@@ -4782,6 +4957,7 @@ function renderRoomLiveRanking() {
 }
 
 function renderLeaderboard(scores) {
+  document.body.classList.toggle("in-online-room", Boolean(roomCode));
   if (roomCode) {
     renderRoomLiveRanking();
     return;
@@ -5126,7 +5302,7 @@ let startTapped = false;
 function onStartTap(e) {
   if (startTapped) return;
   startTapped = true;
-  setTimeout(() => { startTapped = false; }, 350);
+  setTimeout(() => { startTapped = false; }, 180);
 
   unlockAudioAndHaptics();
   startGame();

@@ -455,7 +455,7 @@ body.impact-flash::after {
 .overlay {
   position: fixed;
   inset: 0;
-  z-index: 20;
+  z-index: 30;
   display: grid;
   place-items: center;
   padding: 58px 16px 16px;
@@ -724,6 +724,11 @@ p {
   box-shadow: 0 8px 24px rgba(43, 232, 158, 0.36);
 }
 
+.start.is-ready:disabled {
+  filter: none;
+  opacity: 0.96;
+}
+
 .start.ready-prompt {
   background: linear-gradient(95deg, #ffe270 0%, #ff9f2e 55%, #ff5f40 100%);
   color: #1d0902;
@@ -854,8 +859,27 @@ p {
    ═══════════════════════════════════════ */
 @media (max-width: 850px) {
   .leaderboard { display: none; }
+  body.in-online-room:not(.menu-open) .leaderboard {
+    display: block;
+    top: 174px;
+    right: 10px;
+    width: min(178px, calc(100vw - 124px));
+    max-height: 112px;
+    padding: 6px 9px;
+    border-top-width: 2px;
+    background: linear-gradient(175deg, rgba(8, 16, 40, 0.72) 0%, rgba(5, 10, 26, 0.78) 100%);
+  }
+  body.in-online-room .leaderboard .panel-title {
+    font-size: 11px;
+    padding-bottom: 4px;
+  }
+  body.in-online-room .leaderboard .panel-title button { display: none; }
+  body.in-online-room .leaderboard ol { margin: 4px 0 0; }
+  body.in-online-room .leaderboard li { margin: 3px 0; font-size: 11px; gap: 4px; }
+  body.in-online-room .leaderboard li span { font-size: 10px; }
+  body.in-online-room .sound-status { display: none; }
   .server { display: none; }
-  .impact-hud { top: 232px; }
+  .impact-hud { top: 274px; }
   .sound-status {
     right: 10px;
     top: 176px;
@@ -1207,6 +1231,9 @@ p {
 
 body.menu-open .controls,
 body.menu-open .nitro,
+body.menu-open .hud,
+body.menu-open .room-badge,
+body.menu-open .minimap,
 body.menu-open .rival-marker { visibility: hidden; }
 
 li.mine strong, li.mine span { color: #ffd65c; text-shadow: 0 0 10px rgba(255, 214, 92, .65); }
@@ -1230,4 +1257,112 @@ li.mine strong, li.mine span { color: #ffd65c; text-shadow: 0 0 10px rgba(255, 2
 @media (prefers-reduced-motion: reduce) {
   body.crash-flash #game-container { animation: none; }
   .nitro div, .start::after { animation: none; }
+}
+
+/* ── 联机完赛双人成绩单（内嵌在结算/再来一局弹窗内） ── */
+.race-result-card {
+  margin: 6px 0 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: linear-gradient(165deg, rgba(10, 22, 52, 0.88), rgba(6, 12, 30, 0.92));
+  border: 1px solid rgba(97, 239, 255, 0.36);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  text-align: left;
+}
+
+.race-result-verdict {
+  font-size: 14px;
+  font-weight: 900;
+  color: #ffe37a;
+  margin-bottom: 8px;
+  text-align: center;
+  text-shadow: 0 0 10px rgba(255, 214, 92, 0.35);
+}
+
+.race-result-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  margin-top: 6px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(140, 210, 255, 0.16);
+}
+
+.race-result-row.mine {
+  background: rgba(255, 214, 92, 0.12);
+  border-color: rgba(255, 214, 92, 0.48);
+}
+
+.race-result-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.race-result-rank {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.race-result-name {
+  font-size: 14px;
+  font-weight: 800;
+  color: #f0f8ff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.race-result-row.mine .race-result-name {
+  color: #ffe37a;
+}
+
+.race-result-meta {
+  flex-shrink: 0;
+  text-align: right;
+  font-size: 12px;
+  color: #9cecff;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.race-result-meta b {
+  color: #61efff;
+  font-size: 14px;
+  font-family: 'Orbitron', monospace;
+}
+
+.race-result-meta .dnf {
+  color: #ffb37a;
+  font-size: 12px;
+}
+
+.race-result-foot {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #a8c7e8;
+  text-align: center;
+}
+
+.finish-countdown-banner {
+  position: fixed;
+  top: 76px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: none;
+  padding: 8px 18px;
+  border-radius: 999px;
+  background: rgba(18, 12, 34, 0.88);
+  border: 1.5px solid rgba(255, 196, 61, 0.85);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 18px rgba(255, 180, 50, 0.35);
+  color: #ffe896;
+  font-size: 14px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  pointer-events: none;
 }

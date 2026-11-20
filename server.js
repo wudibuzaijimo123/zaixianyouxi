@@ -109,6 +109,8 @@ function maybeStartCountdown(room) {
     : false;
 }
 
+const FINISH_GRACE_MS = 5000;
+
 function buildRoomSyncPayload(room, viewerId) {
   const actives = activePlayers(room);
   const viewer = viewerId ? room.players.get(viewerId) : null;
@@ -121,7 +123,8 @@ function buildRoomSyncPayload(room, viewerId) {
   const myResumeDist = ongoing && viewer && !viewer.inRace && Number(viewer.distance) > 0
     ? Math.round(Number(viewer.distance))
     : 0;
-  const finishRemainSec = room.finishAt ? Math.max(0, Math.ceil((10000 - (Date.now() - room.finishAt)) / 1000)) : 0;
+  const finishRemainSec = room.finishAt ? Math.max(0, Math.ceil((FINISH_GRACE_MS - (Date.now() - room.finishAt)) / 1000)) : 0;
+  const allFinished = actives.length >= 2 && actives.every(p => p.finished);
   room._syncSeq = (room._syncSeq || 0) + 1;
   return {
     ok: true,
@@ -142,7 +145,7 @@ function buildRoomSyncPayload(room, viewerId) {
     theme: room.theme || "country",
     difficulty: room.difficulty || "normal",
     playerCount: actives.length,
-    raceOver: Boolean(room.finishAt && Date.now() - room.finishAt > 10000),
+    raceOver: Boolean(room.finishAt && (Date.now() - room.finishAt >= FINISH_GRACE_MS || allFinished)),
     finishRemainSec,
     players: others,
     ...pauseInfo
@@ -503,7 +506,7 @@ const server = http.createServer(async (request, response) => {
       const forceLobby = Boolean(body.forceLobby);
       const waitingOtherFinish = !forceLobby && Boolean(
         room.finishAt &&
-        (Date.now() - room.finishAt) <= 10000 &&
+        (Date.now() - room.finishAt) < FINISH_GRACE_MS &&
         activePlayers(room).some(p => p.id !== player.id && p.inRace && !p.finished)
       );
       if (waitingOtherFinish) {
