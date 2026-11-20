@@ -362,7 +362,7 @@ const server = http.createServer(async (request, response) => {
       return sendJson(response, 405, { error: "Method not allowed" });
     }
 
-    return serveStatic(url.pathname, response);
+    return serveStatic(url.pathname, request, response);
   } catch (error) {
     console.error(error);
     return sendJson(response, 500, { error: "Server error" });
@@ -409,7 +409,7 @@ function normalizeScore(payload) {
   };
 }
 
-function serveStatic(urlPath, response) {
+function serveStatic(urlPath, request, response) {
   const safePath = decodeURIComponent(urlPath.split("?")[0]);
   const target = safePath === "/" ? "/index.html" : safePath;
   const filePath = path.normalize(path.join(rootDir, target));
@@ -430,9 +430,39 @@ function serveStatic(urlPath, response) {
       return;
     }
     const ext = path.extname(filePath).toLowerCase();
+    const contentType = mimeTypes[ext] || "application/octet-stream";
+    const cacheControl = ext === ".html" ? "no-cache" : "public, max-age=3600";
+    const rangeHeader = request.headers && request.headers.range;
+
+    // 支持 HTTP Range (206 Partial Content)，iOS Safari <audio> 必须依赖它才能播放
+    if (rangeHeader && content.length > 0) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(String(rangeHeader).trim());
+      if (match) {
+        let start = match[1] ? parseInt(match[1], 10) : 0;
+        let end = match[2] ? parseInt(match[2], 10) : content.length - 1;
+        if (Number.isNaN(start)) start = 0;
+        if (Number.isNaN(end) || end >= content.length) end = content.length - 1;
+        if (start > end || start >= content.length) {
+          response.writeHead(416, { "Content-Range": `bytes */${content.length}` });
+          return response.end();
+        }
+        const chunk = content.subarray(start, end + 1);
+        response.writeHead(206, {
+          "Content-Type": contentType,
+          "Content-Range": `bytes ${start}-${end}/${content.length}`,
+          "Content-Length": chunk.length,
+          "Accept-Ranges": "bytes",
+          "Cache-Control": cacheControl
+        });
+        return response.end(chunk);
+      }
+    }
+
     response.writeHead(200, {
-      "Content-Type": mimeTypes[ext] || "application/octet-stream",
-      "Cache-Control": ext === ".html" ? "no-cache" : "public, max-age=3600"
+      "Content-Type": contentType,
+      "Content-Length": content.length,
+      "Accept-Ranges": "bytes",
+      "Cache-Control": cacheControl
     });
     response.end(content);
   });

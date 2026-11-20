@@ -823,42 +823,47 @@ class MusicEngine {
     if (!this.enabled) return;
     this.ensureContext();
 
-    // 1. 原生 HTML5 音频播放
+    // 1. 原生 HTML5 音频播放（配合服务端 206 Range，兼容 iOS Safari）
     if (this.bgmAudio) {
       try {
-        if (this.bgmAudio.readyState > 0) {
-          this.bgmAudio.currentTime = 0;
-        }
         this.bgmAudio.volume = 1.0;
-        const playPromise = this.bgmAudio.play();
-        if (playPromise !== undefined) {
-          playPromise.then(() => {
-            if (soundStatus) soundStatus.textContent = "🔊 音乐播放中";
-          }).catch(e => {
-            console.log("HTML5 Audio wait for gesture:", e);
-          });
+        if (this.bgmAudio.paused) {
+          const playPromise = this.bgmAudio.play();
+          if (playPromise !== undefined) {
+            playPromise.then(() => {
+              if (soundStatus) soundStatus.textContent = "🔊 音乐播放中";
+            }).catch(e => {
+              console.log("HTML5 Audio wait for gesture:", e);
+            });
+          }
         }
       } catch (e) {}
     }
 
-    // 2. Web Audio 双保险合成音循环 (若 HTML5 音频加载延迟，合成音立即无缝开声)
+    // 2. Web Audio 双保险流行曲合成循环（与 bgm.wav 同款王道流行进行 Fmaj7-G6-Em7-Am7）
     if (this.ctx && !this.synthTimer) {
-      const melody = [523.25, 0, 587.33, 659.25, 783.99, 0, 659.25, 587.33, 523.25, 0, 440.0, 523.25, 587.33, 0, 523.25, 0, 659.25, 0, 783.99, 880.0, 1046.5, 0, 880.0, 783.99, 659.25, 0, 783.99, 659.25, 523.25, 0, 587.33, 0];
-      const bass = [130.81, 130.81, 130.81, 130.81, 98.00, 98.00, 98.00, 98.00, 110.00, 110.00, 110.00, 110.00, 87.31, 87.31, 87.31, 87.31];
+      const melody = [
+        659.25, 659.25, 783.99, 880.00, 783.99, 659.25, 587.33, 523.25,
+        587.33, 659.25, 783.99, 0,      659.25, 587.33, 523.25, 0,
+        659.25, 659.25, 783.99, 880.00, 1046.5, 880.00, 783.99, 659.25,
+        783.99, 880.00, 659.25, 0,      523.25, 587.33, 659.25, 0
+      ];
+      const bass = [87.31, 87.31, 98.00, 98.00, 82.41, 82.41, 110.00, 110.00];
 
       this.synthTimer = setInterval(() => {
         if (!this.enabled || !running || !this.ctx || this.ctx.state !== "running") return;
+        // 如果原生 HTML5 流行歌已经在顺畅播放，就不再叠加合成音避免重影
+        if (this.bgmAudio && !this.bgmAudio.paused && this.bgmAudio.readyState >= 2) return;
         const now = this.ctx.currentTime + 0.01;
         const idx = this.synthStep % 32;
 
-        // 底鼓
-        if (idx % 4 === 0) {
+        if (idx % 2 === 0) {
           try {
             const osc = this.ctx.createOscillator();
             const gain = this.ctx.createGain();
-            osc.frequency.setValueAtTime(145, now);
-            osc.frequency.exponentialRampToValueAtTime(36, now + 0.12);
-            gain.gain.setValueAtTime(0.4, now);
+            osc.frequency.setValueAtTime(135, now);
+            osc.frequency.exponentialRampToValueAtTime(42, now + 0.12);
+            gain.gain.setValueAtTime(0.35, now);
             gain.gain.linearRampToValueAtTime(0.01, now + 0.13);
             osc.connect(gain);
             gain.connect(this.ctx.destination);
@@ -867,15 +872,14 @@ class MusicEngine {
           } catch(e) {}
         }
 
-        // 贝斯
-        const bFreq = bass[Math.floor(idx / 2) % 16];
-        if (bFreq && idx % 2 === 0) {
+        const bFreq = bass[Math.floor(idx / 4) % 8];
+        if (bFreq) {
           try {
             const osc = this.ctx.createOscillator();
             const gain = this.ctx.createGain();
             osc.type = "triangle";
-            osc.frequency.setValueAtTime(bFreq, now);
-            gain.gain.setValueAtTime(0.25, now);
+            osc.frequency.setValueAtTime(bFreq * (idx % 2 === 1 ? 2 : 1), now);
+            gain.gain.setValueAtTime(0.22, now);
             gain.gain.exponentialRampToValueAtTime(0.01, now + 0.18);
             osc.connect(gain);
             gain.connect(this.ctx.destination);
@@ -884,7 +888,6 @@ class MusicEngine {
           } catch(e) {}
         }
 
-        // 旋律
         const mFreq = melody[idx];
         if (mFreq > 0) {
           try {
@@ -892,7 +895,7 @@ class MusicEngine {
             const gain = this.ctx.createGain();
             osc.type = "triangle";
             osc.frequency.setValueAtTime(mFreq, now);
-            gain.gain.setValueAtTime(0.28, now);
+            gain.gain.setValueAtTime(0.24, now);
             gain.gain.exponentialRampToValueAtTime(0.005, now + 0.22);
             osc.connect(gain);
             gain.connect(this.ctx.destination);
@@ -902,7 +905,7 @@ class MusicEngine {
         }
 
         this.synthStep++;
-      }, 130);
+      }, 250);
     }
   }
 
@@ -1001,18 +1004,20 @@ class MusicEngine {
   toggle() {
     this.enabled = !this.enabled;
     localStorage.setItem("racerAudioEnabled", this.enabled ? "1" : "0");
-    if (this.bgmAudio) {
-      if (this.enabled && running) {
+    if (this.enabled) {
+      this.ensureContext();
+      if (running) {
+        this.startBGM();
+      } else if (this.bgmAudio) {
+        // 菜单上点开喇叭时立即预热/解锁，保证移动端随时可播
         this.bgmAudio.play().catch(() => {});
-      } else {
-        this.bgmAudio.pause();
       }
-    }
-    if (!this.enabled && this.synthTimer) {
-      clearInterval(this.synthTimer);
-      this.synthTimer = null;
-    } else if (this.enabled && running && !this.synthTimer) {
-      this.startBGM();
+    } else {
+      if (this.bgmAudio) this.bgmAudio.pause();
+      if (this.synthTimer) {
+        clearInterval(this.synthTimer);
+        this.synthTimer = null;
+      }
     }
     return this.enabled;
   }
@@ -1239,7 +1244,12 @@ const SCENERY_ASSETS = (() => {
       coconut: mat({ color: 0x4b2e19, roughness: 0.85 }),
       hay: mat({ color: 0xd8b454, roughness: 0.95 }),
       canyonRock: mat({ color: 0x9c5a41, roughness: 0.92 }),
-      canyonRockDark: mat({ color: 0x76412f, roughness: 0.95 })
+      canyonRockDark: mat({ color: 0x76412f, roughness: 0.95 }),
+      bush: mat({ color: 0x3b7a2a, roughness: 0.85 }),
+      flowerPink: mat({ color: 0xff7597, roughness: 0.6 }),
+      flowerYellow: mat({ color: 0xffd166, roughness: 0.6 }),
+      lampPole: mat({ color: 0x374151, metalness: 0.75, roughness: 0.35 }),
+      lampGlow: mat({ color: 0xfff3c4, emissive: 0xffd166, emissiveIntensity: 0.85, roughness: 0.2 })
     },
     geos: {
       sphere: new THREE.SphereGeometry(1, 14, 10),
@@ -1633,6 +1643,63 @@ function createCanyonRock() {
   return g;
 }
 
+// 8. 路边灌木花丛 / 木栅栏 / 公路路灯
+function createFlowerBush() {
+  const g = new THREE.Group();
+  const { mats, geos } = SCENERY_ASSETS;
+  const main = new THREE.Mesh(geos.foliage, mats.bush);
+  main.scale.set(1.05, 0.72, 0.95);
+  main.position.y = 0.45;
+  g.add(main);
+  const side = new THREE.Mesh(geos.foliage, mats.leafLight);
+  side.scale.set(0.7, 0.55, 0.7);
+  side.position.set(0.65, 0.35, 0.25);
+  g.add(side);
+  [[-0.3, 0.72, 0.3, mats.flowerPink], [0.25, 0.68, -0.25, mats.flowerYellow], [0.65, 0.55, 0.25, mats.flowerPink]].forEach(([fx, fy, fz, fm]) => {
+    const fl = new THREE.Mesh(geos.sphere, fm);
+    fl.scale.setScalar(0.14);
+    fl.position.set(fx, fy, fz);
+    g.add(fl);
+  });
+  return g;
+}
+
+function createRoadFence() {
+  const g = new THREE.Group();
+  const { mats, geos } = SCENERY_ASSETS;
+  [-1.3, 0, 1.3].forEach(pz => {
+    const post = new THREE.Mesh(geos.box, mats.woodDark);
+    post.scale.set(0.16, 1.05, 0.16);
+    post.position.set(0, 0.52, pz);
+    g.add(post);
+  });
+  [0.42, 0.82].forEach(ry => {
+    const rail = new THREE.Mesh(geos.box, mats.woodWall);
+    rail.scale.set(0.1, 0.12, 3.0);
+    rail.position.set(0, ry, 0);
+    g.add(rail);
+  });
+  return g;
+}
+
+function createStreetLamp() {
+  const g = new THREE.Group();
+  const { mats, geos } = SCENERY_ASSETS;
+  const pole = new THREE.Mesh(geos.cyl, mats.lampPole);
+  pole.scale.set(0.1, 5.2, 0.1);
+  pole.position.y = 2.6;
+  g.add(pole);
+  const arm = new THREE.Mesh(geos.box, mats.lampPole);
+  arm.scale.set(1.2, 0.1, 0.1);
+  arm.position.set(0.55, 5.15, 0);
+  g.add(arm);
+  const bulb = new THREE.Mesh(geos.box, mats.lampGlow);
+  bulb.scale.set(0.45, 0.12, 0.24);
+  bulb.position.set(1.05, 5.05, 0);
+  g.add(bulb);
+  return g;
+}
+
 // ═══════════════════════════════════════
 // 真正的普通纯电轿车（特斯拉 Model 3 风格）
 // 绝无 F1 大尾翼风刀，圆润流线全景天幕
@@ -1712,6 +1779,11 @@ const CAR_ASSETS = (() => {
   flameGeo.rotateX(Math.PI / 2);
   flameGeo.translate(0, 0, 0.72);
 
+  const archGeo = new THREE.TorusGeometry(0.51, 0.075, 8, 14, Math.PI);
+  archGeo.rotateY(Math.PI / 2);
+  const discGeo = new THREE.CylinderGeometry(0.24, 0.24, 0.08, 12);
+  discGeo.rotateZ(Math.PI / 2);
+
   return {
     bodyGeo,
     cabinGeo,
@@ -1720,12 +1792,15 @@ const CAR_ASSETS = (() => {
     spokeGeo,
     hubGeo,
     flameGeo,
+    archGeo,
+    discGeo,
     box: new THREE.BoxGeometry(1, 1, 1),
     glassMat: new THREE.MeshStandardMaterial({ color: 0x0b1322, roughness: 0.08, metalness: 0.9 }),
     trimMat: new THREE.MeshStandardMaterial({ color: 0x1d2026, roughness: 0.65, metalness: 0.4 }),
     tireMat: new THREE.MeshStandardMaterial({ color: 0x17181c, roughness: 0.9 }),
     rimMat: new THREE.MeshStandardMaterial({ color: 0x9aa4b2, metalness: 0.85, roughness: 0.28 }),
     hubMat: new THREE.MeshStandardMaterial({ color: 0x2a2f38, metalness: 0.8, roughness: 0.35 }),
+    caliperMat: new THREE.MeshStandardMaterial({ color: 0xd92638, roughness: 0.35, metalness: 0.5 }),
     hlMat: new THREE.MeshBasicMaterial({ color: 0xf4fbff }),
     tailMat: new THREE.MeshBasicMaterial({ color: 0xff2238 }),
     plateMat: new THREE.MeshBasicMaterial({ color: 0xd9ecff }),
@@ -1751,16 +1826,40 @@ function createTeslaCar(isPlayer = true, colorHex = 0xffffff) {
   // 2. 全景熏黑玻璃座舱（前挡风 + 天幕 + 侧窗 + 后溜背）
   carGroup.add(new THREE.Mesh(CAR_ASSETS.cabinGeo, CAR_ASSETS.glassMat));
 
-  // 3. 深色运动侧裙 / 尾部扩散器
+  // 3. 深色运动侧裙 / 前唇进气格栅 / 尾部扩散器与小鸭尾
   const skirt = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
   skirt.scale.set(1.94, 0.1, 4.46);
   skirt.position.set(0, 0.21, -1.35);
   carGroup.add(skirt);
 
+  const grille = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
+  grille.scale.set(1.38, 0.14, 0.12);
+  grille.position.set(0, 0.34, -3.77);
+  carGroup.add(grille);
+
+  const lipSpoiler = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
+  lipSpoiler.scale.set(1.66, 0.05, 0.12);
+  lipSpoiler.position.set(0, 0.88, 0.94);
+  carGroup.add(lipSpoiler);
+
   const diffuser = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
   diffuser.scale.set(1.55, 0.18, 0.14);
   diffuser.position.set(0, 0.3, 0.96);
   carGroup.add(diffuser);
+
+  // 车窗 B 柱分隔 + 车顶压线 + 轮眉包边
+  [-1, 1].forEach(side => {
+    const bPillar = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
+    bPillar.scale.set(0.04, 0.44, 0.14);
+    bPillar.position.set(side * 0.77, 1.07, -1.25);
+    carGroup.add(bPillar);
+
+    [0.0, -2.7].forEach(wz => {
+      const arch = new THREE.Mesh(CAR_ASSETS.archGeo, CAR_ASSETS.trimMat);
+      arch.position.set(side * 0.96, 0.42, wz);
+      carGroup.add(arch);
+    });
+  });
 
   // 4. 外后视镜 + 隐藏式门把手 + 前矩阵 LED 大灯
   [-1, 1].forEach(side => {
@@ -1813,6 +1912,14 @@ function createTeslaCar(isPlayer = true, colorHex = 0xffffff) {
     const spinGroup = new THREE.Group();
     spinGroup.add(new THREE.Mesh(CAR_ASSETS.tireGeo, CAR_ASSETS.tireMat));
     spinGroup.add(new THREE.Mesh(CAR_ASSETS.rimGeo, CAR_ASSETS.hubMat));
+
+    // 刹车盘 + 红色运动卡钳
+    const disc = new THREE.Mesh(CAR_ASSETS.discGeo, CAR_ASSETS.rimMat);
+    spinGroup.add(disc);
+    const caliper = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.caliperMat);
+    caliper.scale.set(0.12, 0.16, 0.12);
+    caliper.position.set(pos[0] > 0 ? -0.06 : 0.06, 0.12, 0.14);
+    steerGroup.add(caliper);
 
     for (let s = 0; s < 5; s++) {
       const spoke = new THREE.Mesh(CAR_ASSETS.spokeGeo, CAR_ASSETS.rimMat);
@@ -2149,25 +2256,30 @@ function applyTheme(themeKey) {
     const rand = Math.random();
 
     if (themeKey === "country") {
-      if (rand < 0.24) item = createCow();          // 写实奶牛
-      else if (rand < 0.44) item = createDeer();     // 灵动梅花鹿
-      else if (rand < 0.58) item = createWindmill(); // 荷兰风车
-      else if (rand < 0.72) item = createFarmCabin(); // 农庄木屋
-      else if (rand < 0.84) item = createHayBale();  // 田园麦草垛
+      if (rand < 0.20) item = createCow();          // 写实奶牛
+      else if (rand < 0.36) item = createDeer();     // 灵动梅花鹿
+      else if (rand < 0.48) item = createWindmill(); // 荷兰风车
+      else if (rand < 0.60) item = createFarmCabin(); // 农庄木屋
+      else if (rand < 0.70) item = createHayBale();  // 田园麦草垛
+      else if (rand < 0.80) item = createFlowerBush(); // 花丛灌木
+      else if (rand < 0.88) item = createRoadFence(); // 木栅栏
       else item = createTree();                      // 多层自然大树
     } else if (themeKey === "island") {
-      if (rand < 0.25) item = createDeer();
-      else if (rand < 0.42) item = createWindmill();
-      else if (rand < 0.56) item = createCanyonRock();
+      if (rand < 0.22) item = createDeer();
+      else if (rand < 0.36) item = createWindmill();
+      else if (rand < 0.50) item = createCanyonRock();
+      else if (rand < 0.64) item = createFlowerBush();
       else item = createPalm();
     } else if (themeKey === "jungle") {
-      if (rand < 0.35) item = createDeer();
-      else if (rand < 0.50) item = createCanyonRock();
+      if (rand < 0.30) item = createDeer();
+      else if (rand < 0.45) item = createCanyonRock();
+      else if (rand < 0.62) item = createFlowerBush();
       else item = createTree();
     } else {
-      if (rand < 0.22) item = createCow();
-      else if (rand < 0.45) item = createFarmCabin();
-      else if (rand < 0.72) item = createCanyonRock();
+      if (rand < 0.18) item = createCow();
+      else if (rand < 0.36) item = createFarmCabin();
+      else if (rand < 0.60) item = createCanyonRock();
+      else if (rand < 0.74) item = createStreetLamp();
       else item = createTree();
     }
 
