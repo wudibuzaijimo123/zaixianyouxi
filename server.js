@@ -358,7 +358,7 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
-    if (request.method !== "GET") {
+    if (request.method !== "GET" && request.method !== "HEAD") {
       return sendJson(response, 405, { error: "Method not allowed" });
     }
 
@@ -454,7 +454,7 @@ function serveStatic(urlPath, request, response) {
           "Accept-Ranges": "bytes",
           "Cache-Control": cacheControl
         });
-        return response.end(chunk);
+        return request.method === "HEAD" ? response.end() : response.end(chunk);
       }
     }
 
@@ -464,7 +464,7 @@ function serveStatic(urlPath, request, response) {
       "Accept-Ranges": "bytes",
       "Cache-Control": cacheControl
     });
-    response.end(content);
+    return request.method === "HEAD" ? response.end() : response.end(content);
   });
 }
 
