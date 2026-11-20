@@ -149,6 +149,11 @@ canvas {
   box-shadow: 0 0 12px rgba(98, 239, 255, 0.25);
 }
 
+.quick-scene-select select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .server {
   display: flex;
   align-items: center;
@@ -472,6 +477,12 @@ p {
   box-shadow: 0 0 16px rgba(92, 238, 255, 0.35);
 }
 
+.theme-chip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
 .chip-icon {
   font-size: 16px;
 }
@@ -666,7 +677,7 @@ p {
   .leaderboard { display: none; }
   .server { display: none; }
   .impact-hud { top: 134px; }
-  .sound-status { right: 10px; bottom: 104px; }
+  .sound-status { right: 10px; top: 164px; bottom: auto; }
 
   .topbar { padding: 10px 14px 4px; }
   .brand { font-size: 18px; }
@@ -692,9 +703,9 @@ p {
   .metric span { font-size: 9px; margin-top: 2px; }
 
   .nitro {
-    left: 30px;
-    right: 30px;
-    bottom: 114px;
+    left: 16px;
+    right: 16px;
+    bottom: calc(230px + env(safe-area-inset-bottom));
     width: auto;
     height: 7px;
   }

@@ -106,12 +106,11 @@ const server = http.createServer(async (request, response) => {
       }
       if (action === "create") {
         const finishDistance = Math.max(300, Math.min(20000, Number(body.finishDistance) || 1500));
+        const validThemes = new Set(["country", "island", "jungle", "river"]);
+        const theme = validThemes.has(body.theme) ? body.theme : "country";
         const existing = raceRooms.get(roomCode);
-        if (existing && existing.players.size >= 2) {
-          return sendJson(response, 409, { error: "这个房间号已经满了，换一个吧。" });
-        }
         if (!existing) {
-          raceRooms.set(roomCode, { players: new Map(), updatedAt: Date.now(), startAt: 0, finishDistance });
+          raceRooms.set(roomCode, { players: new Map(), leftSeats: new Map(), hostId: "", updatedAt: Date.now(), startAt: 0, finishDistance, theme });
         }
       }
 
@@ -121,37 +120,96 @@ const server = http.createServer(async (request, response) => {
           error: action === "join" ? "房间不存在，请让房主先创建这个房间号。" : "房间不存在，请检查房间码。"
         });
       }
+      if (!room.leftSeats) room.leftSeats = new Map();
       for (const [id, player] of room.players) {
-        if (Date.now() - player.updatedAt > TIMEOUT_MS) room.players.delete(id);
+        if (Date.now() - player.updatedAt > TIMEOUT_MS) {
+          if (room.startAt && Date.now() >= room.startAt && !room.finishAt) {
+            room.leftSeats.set(id, { ...player, isHost: id === room.hostId });
+            room.leftSeats.set(`name:${String(player.name || "").trim().toLowerCase()}`, { ...player, isHost: id === room.hostId });
+          }
+          room.players.delete(id);
+        }
       }
+
+      // 支持误退出 / 刷新页面后按原 playerId 或同昵称重连回到当前对局
+      const resumeId = String(body.resumePlayerId || "");
+      const nameKey = `name:${name.trim().toLowerCase()}`;
+      let resumedSeat = (resumeId && room.players.get(resumeId)) || null;
+      if (!resumedSeat && room.players.size >= 2) {
+        resumedSeat = [...room.players.values()].find(p => String(p.name || "").trim().toLowerCase() === name.trim().toLowerCase()) || null;
+      }
+      if (resumedSeat) {
+        resumedSeat.updatedAt = Date.now();
+        resumedSeat.name = name;
+        room.updatedAt = Date.now();
+        return sendJson(response, 200, {
+          roomCode,
+          playerId: resumedSeat.id,
+          isHost: resumedSeat.id === room.hostId,
+          resumed: Boolean(room.startAt && Date.now() >= room.startAt),
+          distance: resumedSeat.distance || 0,
+          x: resumedSeat.x || 0,
+          startAt: room.startAt || 0,
+          serverNow: Date.now(),
+          finishDistance: room.finishDistance,
+          theme: room.theme || "country",
+          playerCount: activePlayers(room).length,
+          lane: resumedSeat.lane,
+          color: resumedSeat.color
+        });
+      }
+
+      const savedLeft = (resumeId && room.leftSeats.get(resumeId)) || room.leftSeats.get(nameKey) || null;
       if (activePlayers(room).length >= 2) {
-        return sendJson(response, 409, { error: "房间已满，先让对方退出房间或等 4 秒掉线后再进。" });
+        return sendJson(response, 409, { error: "房间已满，先让对方退出房间或等 15 秒掉线后再进。" });
       }
-      const playerId = Math.random().toString(36).slice(2, 12);
+      const playerId = savedLeft ? savedLeft.id : Math.random().toString(36).slice(2, 12);
+      if (savedLeft) {
+        room.leftSeats.delete(savedLeft.id);
+        room.leftSeats.delete(nameKey);
+      }
+      if (!room.hostId && (action === "create" || savedLeft?.isHost)) {
+        room.hostId = playerId;
+      }
       // 起跑车道和车身颜色都由服务器分配，两边看到的是同一套
       const occupiedLanes = new Set([...room.players.values()].map(player => player.lane));
-      const lane = occupiedLanes.has(-1) ? 1 : -1;
+      const lane = savedLeft ? savedLeft.lane : (occupiedLanes.has(-1) ? 1 : -1);
       // 颜色只做区分；选相近亮度，避免某个车手更醒目而占视觉优势。
-      const color = lane === -1 ? "#29a3ff" : "#ff9a3c";
+      const color = savedLeft ? savedLeft.color : (lane === -1 ? "#29a3ff" : "#ff9a3c");
       room.players.set(playerId, {
-        id: playerId, name, lane, color, x: 0, heading: 0, speed: 0, distance: 0,
-        finished: false, updatedAt: Date.now()
+        id: playerId,
+        name,
+        lane,
+        color,
+        x: savedLeft ? (savedLeft.x || 0) : 0,
+        heading: savedLeft ? (savedLeft.heading || 0) : 0,
+        speed: savedLeft ? (savedLeft.speed || 0) : 0,
+        distance: savedLeft ? (savedLeft.distance || 0) : 0,
+        finished: Boolean(savedLeft?.finished),
+        updatedAt: Date.now()
       });
       room.updatedAt = Date.now();
 
-      // 两人到齐 → 安排统一起跑时刻（4 秒倒计时），双方同时归零起步
+      // 两人到齐 → 安排统一起跑时刻（4 秒倒计时），双方同时归零起步（若对局已在进行则直接恢复）
       const activeCount = activePlayers(room).length;
-      if (activeCount < 2) {
-        room.startAt = 0;   // 只有一个人在房间里：绝不开赛
-      } else if (!room.startAt) {
-        scheduleRaceStart(room);
+      if (!savedLeft || !room.startAt) {
+        if (activeCount < 2) {
+          room.startAt = 0;   // 只有一个人在房间里：绝不开赛
+        } else if (!room.startAt) {
+          scheduleRaceStart(room);
+        }
       }
 
       return sendJson(response, 200, {
         roomCode, playerId,
+        isHost: playerId === room.hostId,
+        resumed: Boolean(savedLeft && room.startAt && Date.now() >= room.startAt),
+        distance: savedLeft ? (savedLeft.distance || 0) : 0,
+        x: savedLeft ? (savedLeft.x || 0) : 0,
         startAt: room.startAt || 0,
         serverNow: Date.now(),
         finishDistance: room.finishDistance,
+        theme: room.theme || "country",
         playerCount: activePlayers(room).length,
         lane,
         color
@@ -173,6 +231,11 @@ const server = http.createServer(async (request, response) => {
           const sp = Number(body.speed);
           if (Number.isFinite(sp) && sp > 0) player.finishSpeed = Math.round(sp * 90);
         }
+      }
+      // 只有房主在发车前可以切换房间赛道主题
+      const validThemes = new Set(["country", "island", "jungle", "river"]);
+      if (body.playerId === room.hostId && validThemes.has(body.theme) && (!room.startAt || Date.now() < room.startAt)) {
+        room.theme = body.theme;
       }
       // 先刷新当前车手心跳，再统计在线人数，避免刚恢复连接时用旧时间误判房间人数。
       player.updatedAt = room.updatedAt = Date.now();
@@ -199,6 +262,7 @@ const server = http.createServer(async (request, response) => {
         startAt: room.startAt || 0,
         serverNow: Date.now(),
         finishDistance: room.finishDistance,
+        theme: room.theme || "country",
         playerCount: activeCount,
         raceOver: Boolean(room.finishAt && Date.now() - room.finishAt > 5000),
         // 只返回仍在上报心跳的对手，离线车手不冒充仍在房间。
@@ -215,18 +279,28 @@ const server = http.createServer(async (request, response) => {
         startAt: room.startAt || 0,
         serverNow: Date.now(),
         finishDistance: room.finishDistance,
+        theme: room.theme || "country",
         playerCount: activePlayers(room).length
       });
     }
 
-    // 退出房间：立刻释放座位，方便同一个号重新进入
+    // 退出房间：保留中途误退出的座位快照以便重新加入，未发车则重置倒计时
     if (request.method === "POST" && url.pathname === "/api/race/leave") {
       const body = JSON.parse(await readBody(request) || "{}");
       const code = String(body.roomCode || "").toUpperCase();
+      const pid = String(body.playerId || "");
       const room = raceRooms.get(code);
       if (room) {
-        room.players.delete(String(body.playerId || ""));
-        room.startAt = 0;
+        const leaving = room.players.get(pid);
+        if (leaving && room.startAt && Date.now() >= room.startAt && !room.finishAt) {
+          if (!room.leftSeats) room.leftSeats = new Map();
+          const snap = { ...leaving, isHost: pid === room.hostId };
+          room.leftSeats.set(pid, snap);
+          room.leftSeats.set(`name:${String(leaving.name || "").trim().toLowerCase()}`, snap);
+        } else if (!room.startAt || Date.now() < room.startAt) {
+          room.startAt = 0;
+        }
+        room.players.delete(pid);
         room.updatedAt = Date.now();
       }
       return sendJson(response, 200, { ok: true });
@@ -254,6 +328,7 @@ const server = http.createServer(async (request, response) => {
           startAt: room.startAt || 0,
           serverNow: Date.now(),
           finishDistance: room.finishDistance,
+          theme: room.theme || "country",
           playerCount: activePlayers(room).length,
           raceOver: Boolean(room.finishAt && Date.now() - room.finishAt > 5000)
         };

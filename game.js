@@ -186,6 +186,28 @@ const api = {
   }
 };
 
+const ACTIVE_ROOM_STORAGE = "racerActiveRoom";
+function saveActiveRoom(code, playerId, isHost) {
+  try {
+    localStorage.setItem(ACTIVE_ROOM_STORAGE, JSON.stringify({
+      roomCode: code,
+      playerId,
+      isHost: Boolean(isHost),
+      savedAt: Date.now()
+    }));
+  } catch (e) {}
+}
+function loadActiveRoom() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(ACTIVE_ROOM_STORAGE) || "null");
+    if (!raw || !raw.roomCode || Date.now() - Number(raw.savedAt || 0) > 10 * 60 * 1000) return null;
+    return raw;
+  } catch (e) { return null; }
+}
+function clearActiveRoom() {
+  try { localStorage.removeItem(ACTIVE_ROOM_STORAGE); } catch (e) {}
+}
+
 // 手动房号：两个人输一样的号就进同一个房间，先到的人自动建房
 async function enterRaceRoom(rawCode, mode = "join") {
   const code = String(rawCode || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
@@ -193,6 +215,8 @@ async function enterRaceRoom(rawCode, mode = "join") {
     document.querySelector("#roomStatus").textContent = "先输入房间号（至少 3 位），两人输一样的号就能进同一个房间";
     return;
   }
+  const savedRoom = loadActiveRoom();
+  const resumePlayerId = savedRoom && savedRoom.roomCode === code ? savedRoom.playerId : "";
   // 手里还握着旧座位就先释放，保证"退出后再进来"永远能成功
   if (roomCode && roomPlayerId) {
     await leaveRaceRoom(true);
@@ -204,8 +228,10 @@ async function enterRaceRoom(rawCode, mode = "join") {
         action: mode === "create" ? "create" : "join",
         roomCode: code,
         name: playerNameInput.value.trim() || "车手",
-        // 距离只有房主（创建者）决定，加入方传了也会被服务端忽略
-        finishDistance: mode === "create" ? Number(document.querySelector("#raceLength")?.value || 1500) : undefined
+        resumePlayerId: resumePlayerId || undefined,
+        // 距离和赛道主题只有房主（创建者）决定，加入方传了也会被服务端忽略
+        finishDistance: mode === "create" ? Number(document.querySelector("#raceLength")?.value || 1500) : undefined,
+        theme: mode === "create" ? currentTheme : undefined
       });
       break;
     } catch (error) {
@@ -213,14 +239,25 @@ async function enterRaceRoom(rawCode, mode = "join") {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
   }
+  const isHost = typeof result.isHost === "boolean" ? result.isHost : (mode === "create");
   roomCode = result.roomCode;
   roomPlayerId = result.playerId;
+  raceSync.isHost = isHost;
   raceSync.myLane = Number(result.lane) || 0;
   raceSync.myColor = result.color || "#ffffff";
+  raceSync.resumeState = result.resumed
+    ? { distance: Number(result.distance) || 0, x: Number(result.x) || 0 }
+    : null;
+  saveActiveRoom(roomCode, roomPlayerId, isHost);
+  if (result.theme && THEMES[result.theme] && result.theme !== currentTheme) {
+    applyTheme(result.theme);
+  }
   const total = Number(result.playerCount) || 1;
-  document.querySelector("#roomStatus").textContent = total >= 2
-    ? `房间 ${roomCode} · 两人已就位，马上发车`
-    : `房间 ${roomCode} · 等待对手（让他也输 ${roomCode} 点「进入房间」）`;
+  document.querySelector("#roomStatus").textContent = result.resumed
+    ? `已重连回房间 ${roomCode} · 正在恢复当前对局…`
+    : (total >= 2
+      ? (isHost ? `房间 ${roomCode} · 两人已就位，马上发车` : `已加入房间 ${roomCode} · 赛道与距离由房主决定，马上发车`)
+      : (isHost ? `房间 ${roomCode} · 等待对手（让他也输 ${roomCode} 点「进入房间」）` : `已加入房间 ${roomCode} · 赛道与距离由房主决定，等待对手`));
   const input = document.querySelector("#roomCodeInput");
   if (input) input.value = roomCode;
   document.querySelector("#roomControls")?.classList.add("in-room");
@@ -228,9 +265,10 @@ async function enterRaceRoom(rawCode, mode = "join") {
   updateStartButtonForRoom();
   const lengthSelect = document.querySelector("#raceLength");
   if (lengthSelect) {
-    lengthSelect.disabled = mode !== "create";
-    lengthSelect.title = mode === "create" ? "房主可修改比赛距离" : "比赛距离由房主决定";
+    lengthSelect.disabled = !isHost;
+    lengthSelect.title = isHost ? "房主可修改比赛距离" : "比赛距离由房主决定";
   }
+  setThemeLocked(!isHost);
   if (roomPollTimer) clearInterval(roomPollTimer);
   roomPollTimer = setInterval(syncRaceRoom, 60);
   startRaceStream();
@@ -281,9 +319,12 @@ async function leaveRaceRoom(silent = false) {
     lengthSelect.disabled = false;
     lengthSelect.title = "";
   }
+  raceSync.isHost = false;
+  setThemeLocked(false);
   setRoomBadge("");
   updateStartButtonForRoom();
   if (!silent) {
+    clearActiveRoom();
     document.querySelector("#roomStatus").textContent = "已退出房间，输入房间号可以重新进入";
     running = false;
   }
@@ -304,6 +345,17 @@ function ensureCountdownEl() {
     document.body.appendChild(el);
   }
   return el;
+}
+
+function setThemeLocked(locked) {
+  if (quickSceneSelect) {
+    quickSceneSelect.disabled = locked;
+    quickSceneSelect.title = locked ? "赛道主题由房主决定" : "切换场景";
+  }
+  document.querySelectorAll(".theme-chip").forEach(chip => {
+    chip.disabled = locked;
+    chip.title = locked ? "赛道主题由房主决定" : "";
+  });
 }
 
 function updateStartButtonForRoom() {
@@ -368,6 +420,9 @@ function applyRaceStart(payload) {
     const sel = document.querySelector("#raceLength");
     if (sel) sel.value = String(finishDistance);
   }
+  if (payload.theme && THEMES[payload.theme] && payload.theme !== currentTheme) {
+    applyTheme(payload.theme);
+  }
   updateStartButtonForRoom();
   startMultiRaceCountdown();
 }
@@ -418,7 +473,13 @@ function launchMultiRace() {
   }
   // 服务器给两位车手分配最左/最右车道，位置必须与 AI 车道中心对齐才能发生碰撞。
   const playerLaneIndex = raceSync.myLane < 0 ? 0 : LANE_COUNT - 1;
-  carPhysics.x = -ROAD_WIDTH / 2 + (playerLaneIndex + 0.5) * LANE_WIDTH;
+  if (raceSync.resumeState) {
+    raceDistance = raceSync.resumeState.distance;
+    carPhysics.x = raceSync.resumeState.x;
+    raceSync.resumeState = null;
+  } else {
+    carPhysics.x = -ROAD_WIDTH / 2 + (playerLaneIndex + 0.5) * LANE_WIDTH;
+  }
   player.group.position.x = carPhysics.x;
   // 车身颜色也用服务器分配的那套，两边看到的是同一世界
   if (raceSync.myColor && player.group.userData.paintMaterial) {
@@ -440,7 +501,8 @@ async function syncRaceRoom() {
       roomCode, playerId: roomPlayerId, x: carPhysics.x,
       heading: carPhysics.heading, speed: currentSpeed, distance: raceDistance,
       finished: !running && raceDistance >= finishDistance,
-      time: raceTime
+      time: raceTime,
+      theme: raceSync.isHost ? currentTheme : undefined
     });
     applyRaceStart(posted);
     if (posted.raceOver) forceEndRace();
@@ -497,6 +559,13 @@ function scheduleReconnect() {
 }
 
 // 对手状态只做采样记录，真正的绘制放到每一帧里按外推计算，保证相对运动连续
+function resolveDistinctRivalColor(myColor, otherColor) {
+  const mine = String(myColor || "#29a3ff").trim().toLowerCase();
+  const rival = String(otherColor || "").trim().toLowerCase();
+  if (rival && rival !== mine) return otherColor;
+  return mine === "#ff9a3c" || mine === "#ff6b2b" ? "#29a3ff" : "#ff6b2b";
+}
+
 function updateRemoteCar(other) {
   raceSync.remoteId = other.id;
   raceSync.other = {
@@ -512,12 +581,13 @@ function updateRemoteCar(other) {
   };
   raceSync.remoteName = other.name;
 
+  const rivalColor = resolveDistinctRivalColor(raceSync.myColor, other.color);
   if (!remoteCar) {
-    // 对手车的颜色同样来自服务器，双方看到同一台车同一个颜色
-    remoteCar = createTeslaCar(false, other.color || "#ff9a3c");
+    // 对手与己方始终使用高对比度撞色，一眼分辨双方车辆
+    remoteCar = createTeslaCar(false, rivalColor);
     scene.add(remoteCar.group);
-  } else if (other.color && remoteCar.group.userData.paintMaterial) {
-    remoteCar.group.userData.paintMaterial.color.set(other.color);
+  } else if (remoteCar.group.userData.paintMaterial) {
+    remoteCar.group.userData.paintMaterial.color.set(rivalColor);
   }
   if (!raceSync.tag || raceSync.tagName !== other.name) {
     if (raceSync.tag) remoteCar.group.remove(raceSync.tag);
@@ -590,6 +660,9 @@ function syncRemoteCarVisual() {
   remoteCar.group.position.x += (targetX - remoteCar.group.position.x) * 0.6;
   const otherSlope = (trackCurve(projected + 4) - trackCurve(projected - 4)) / 8;
   remoteCar.group.rotation.y = -o.heading - Math.atan(otherSlope);
+  remoteCar.wheels.forEach(w => {
+    w.spin.rotation.x += Math.max(0.05, o.speed) * 0.65;
+  });
   // 拉开太远就干脆不画（交给屏幕提示条和小地图显示）
   remoteCar.group.visible = Math.abs(rel) < 420;
   updateRivalMarker(rel);
@@ -1110,164 +1183,315 @@ const THEMES = {
 };
 
 // ═══════════════════════════════════════
-// 生动大自然元素模型生成 (动物、木屋、风车、树木)
+// 生动大自然元素模型生成 (共享几何体与材质 + 精细真实造型)
 // ═══════════════════════════════════════
+const SCENERY_ASSETS = (() => {
+  const mat = (opts) => new THREE.MeshStandardMaterial(opts);
+  return {
+    mats: {
+      cowWhite: mat({ color: 0xf4f1ea, roughness: 0.85 }),
+      cowSpot: mat({ color: 0x23252a, roughness: 0.85 }),
+      cowSnout: mat({ color: 0xf4a6b8, roughness: 0.65 }),
+      horn: mat({ color: 0xd8c39e, roughness: 0.6 }),
+      hoof: mat({ color: 0x1a1a1d, roughness: 0.9 }),
+      deerBody: mat({ color: 0xb27340, roughness: 0.75 }),
+      deerBelly: mat({ color: 0xe6d2b5, roughness: 0.8 }),
+      antler: mat({ color: 0x563922, roughness: 0.85 }),
+      stone: mat({ color: 0x7c8087, roughness: 0.95 }),
+      woodWall: mat({ color: 0xd8a878, roughness: 0.85 }),
+      woodDark: mat({ color: 0x5c3d28, roughness: 0.88 }),
+      cabinRoof: mat({ color: 0xa82824, roughness: 0.65 }),
+      windowGlow: mat({ color: 0xffe49e, emissive: 0xffb703, emissiveIntensity: 0.55, roughness: 0.3 }),
+      windowFrame: mat({ color: 0xf5f5f5, roughness: 0.5 }),
+      millTower: mat({ color: 0xebe3d5, roughness: 0.82 }),
+      millCap: mat({ color: 0x2f4f3a, roughness: 0.7 }),
+      millSail: mat({ color: 0xfaf6eb, roughness: 0.75 }),
+      bark: mat({ color: 0x583c2c, roughness: 0.94 }),
+      leafDark: mat({ color: 0x2b6226, roughness: 0.82 }),
+      leafMid: mat({ color: 0x3b7d2b, roughness: 0.8 }),
+      leafLight: mat({ color: 0x539a38, roughness: 0.78 }),
+      palmBark: mat({ color: 0x856845, roughness: 0.92 }),
+      palmLeaf: mat({ color: 0x2f754c, roughness: 0.72 }),
+      coconut: mat({ color: 0x4b2e19, roughness: 0.85 }),
+      hay: mat({ color: 0xd8b454, roughness: 0.95 }),
+      canyonRock: mat({ color: 0x9c5a41, roughness: 0.92 }),
+      canyonRockDark: mat({ color: 0x76412f, roughness: 0.95 })
+    },
+    geos: {
+      sphere: new THREE.SphereGeometry(1, 14, 10),
+      box: new THREE.BoxGeometry(1, 1, 1),
+      cyl: new THREE.CylinderGeometry(1, 1, 1, 10),
+      cone: new THREE.ConeGeometry(1, 1, 8),
+      foliage: new THREE.DodecahedronGeometry(1, 1),
+      hayRoll: (() => {
+        const g = new THREE.CylinderGeometry(0.95, 0.95, 1.5, 14);
+        g.rotateZ(Math.PI / 2);
+        return g;
+      })(),
+      cabinRoof: (() => {
+        const shape = new THREE.Shape();
+        shape.moveTo(-3.4, 0);
+        shape.lineTo(0, 2.2);
+        shape.lineTo(3.4, 0);
+        shape.closePath();
+        const g = new THREE.ExtrudeGeometry(shape, { depth: 5.6, bevelEnabled: false });
+        g.translate(0, 0, -2.8);
+        return g;
+      })()
+    }
+  };
+})();
 
-// 1. 呆萌小牛 (Cow)
+// 1. 写实呆萌奶牛 (Cow)
 function createCow() {
   const cow = new THREE.Group();
-  const whiteMat = new THREE.MeshStandardMaterial({ color: 0xf5f5f5, roughness: 0.8 });
-  const blackMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.8 });
-  const pinkMat = new THREE.MeshStandardMaterial({ color: 0xffafcc, roughness: 0.6 });
+  const { mats, geos } = SCENERY_ASSETS;
 
-  // 身体
-  const body = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.2, 2.4), whiteMat);
-  body.position.y = 1.3;
-  cow.add(body);
+  const torso = new THREE.Mesh(geos.sphere, mats.cowWhite);
+  torso.scale.set(0.76, 0.64, 1.25);
+  torso.position.set(0, 1.28, 0);
+  cow.add(torso);
 
-  // 黑色花斑
-  const spot = new THREE.Mesh(new THREE.BoxGeometry(1.62, 0.7, 1.0), blackMat);
-  spot.position.set(0, 1.35, 0.3);
-  cow.add(spot);
+  const spot1 = new THREE.Mesh(geos.sphere, mats.cowSpot);
+  spot1.scale.set(0.78, 0.52, 0.55);
+  spot1.position.set(0, 1.38, 0.28);
+  cow.add(spot1);
 
-  // 头部
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 1.1), whiteMat);
-  head.position.set(0, 1.8, -1.3);
+  const spot2 = new THREE.Mesh(geos.sphere, mats.cowSpot);
+  spot2.scale.set(0.62, 0.45, 0.42);
+  spot2.position.set(0.18, 1.32, -0.48);
+  cow.add(spot2);
+
+  const head = new THREE.Mesh(geos.box, mats.cowWhite);
+  head.scale.set(0.68, 0.68, 0.82);
+  head.position.set(0, 1.62, -1.25);
+  head.rotation.x = 0.15;
   cow.add(head);
 
-  // 粉色牛鼻子
-  const snout = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.45, 0.4), pinkMat);
-  snout.position.set(0, 1.65, -1.85);
+  const snout = new THREE.Mesh(geos.box, mats.cowSnout);
+  snout.scale.set(0.58, 0.36, 0.34);
+  snout.position.set(0, 1.46, -1.68);
   cow.add(snout);
 
-  // 双角
-  const hornMat = new THREE.MeshStandardMaterial({ color: 0xd4a373 });
-  const hornL = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.4, 5), hornMat);
-  hornL.position.set(-0.4, 2.3, -1.3);
-  hornL.rotation.z = -0.3;
-  cow.add(hornL);
+  [-1, 1].forEach(side => {
+    const ear = new THREE.Mesh(geos.box, mats.cowSpot);
+    ear.scale.set(0.28, 0.12, 0.18);
+    ear.position.set(side * 0.44, 1.82, -1.16);
+    ear.rotation.z = side * -0.3;
+    cow.add(ear);
 
-  const hornR = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.4, 5), hornMat);
-  hornR.position.set(0.4, 2.3, -1.3);
-  hornR.rotation.z = 0.3;
-  cow.add(hornR);
+    const horn = new THREE.Mesh(geos.cone, mats.horn);
+    horn.scale.set(0.08, 0.32, 0.08);
+    horn.position.set(side * 0.28, 2.04, -1.18);
+    horn.rotation.z = side * -0.45;
+    cow.add(horn);
 
-  // 四条腿
-  const legGeo = new THREE.CylinderGeometry(0.16, 0.16, 0.9, 6);
-  const legPositions = [
-    [-0.55, 0.45, -0.8],
-    [ 0.55, 0.45, -0.8],
-    [-0.55, 0.45,  0.8],
-    [ 0.55, 0.45,  0.8]
-  ];
-  legPositions.forEach(p => {
-    const leg = new THREE.Mesh(legGeo, blackMat);
-    leg.position.set(p[0], p[1], p[2]);
-    cow.add(leg);
+    const eye = new THREE.Mesh(geos.sphere, mats.hoof);
+    eye.scale.setScalar(0.06);
+    eye.position.set(side * 0.25, 1.72, -1.62);
+    cow.add(eye);
   });
+
+  [[-0.44, -0.72], [0.44, -0.72], [-0.44, 0.72], [0.44, 0.72]].forEach(([lx, lz]) => {
+    const leg = new THREE.Mesh(geos.cyl, mats.cowWhite);
+    leg.scale.set(0.13, 0.85, 0.13);
+    leg.position.set(lx, 0.46, lz);
+    cow.add(leg);
+
+    const hoof = new THREE.Mesh(geos.cyl, mats.hoof);
+    hoof.scale.set(0.14, 0.14, 0.14);
+    hoof.position.set(lx, 0.07, lz);
+    cow.add(hoof);
+  });
+
+  const tail = new THREE.Mesh(geos.cyl, mats.cowSpot);
+  tail.scale.set(0.04, 0.72, 0.04);
+  tail.position.set(0, 1.12, 1.22);
+  tail.rotation.x = 0.28;
+  cow.add(tail);
 
   return cow;
 }
 
-// 2. 灵动小鹿 (Deer)
+// 2. 灵动梅花鹿 (Deer)
 function createDeer() {
   const deer = new THREE.Group();
-  const deerMat = new THREE.MeshStandardMaterial({ color: 0xa66a38, roughness: 0.7 });
-  const antlerMat = new THREE.MeshStandardMaterial({ color: 0x4a321e });
+  const { mats, geos } = SCENERY_ASSETS;
 
-  // 身体
-  const body = new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.0, 2.0), deerMat);
-  body.position.y = 1.4;
-  deer.add(body);
+  const torso = new THREE.Mesh(geos.sphere, mats.deerBody);
+  torso.scale.set(0.52, 0.48, 0.98);
+  torso.position.set(0, 1.36, 0);
+  deer.add(torso);
 
-  // 细长颈部与小头
-  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.35, 1.0, 6), deerMat);
-  neck.position.set(0, 2.1, -0.9);
-  neck.rotation.x = 0.35;
+  const tailPatch = new THREE.Mesh(geos.sphere, mats.deerBelly);
+  tailPatch.scale.set(0.24, 0.24, 0.18);
+  tailPatch.position.set(0, 1.46, 0.92);
+  deer.add(tailPatch);
+
+  const neck = new THREE.Mesh(geos.cyl, mats.deerBody);
+  neck.scale.set(0.18, 0.92, 0.2);
+  neck.position.set(0, 1.96, -0.76);
+  neck.rotation.x = 0.36;
   deer.add(neck);
 
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.55, 0.8), deerMat);
-  head.position.set(0, 2.6, -1.2);
+  const head = new THREE.Mesh(geos.sphere, mats.deerBody);
+  head.scale.set(0.26, 0.24, 0.44);
+  head.position.set(0, 2.46, -1.08);
   deer.add(head);
 
-  // 鹿角
-  const antlerL = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.08, 0.9, 4), antlerMat);
-  antlerL.position.set(-0.25, 3.1, -1.1);
-  antlerL.rotation.z = -0.4;
-  deer.add(antlerL);
+  const nose = new THREE.Mesh(geos.sphere, mats.hoof);
+  nose.scale.setScalar(0.06);
+  nose.position.set(0, 2.44, -1.5);
+  deer.add(nose);
 
-  const antlerR = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.08, 0.9, 4), antlerMat);
-  antlerR.position.set(0.25, 3.1, -1.1);
-  antlerR.rotation.z = 0.4;
-  deer.add(antlerR);
+  [-1, 1].forEach(side => {
+    const ear = new THREE.Mesh(geos.cone, mats.deerBody);
+    ear.scale.set(0.09, 0.26, 0.05);
+    ear.position.set(side * 0.22, 2.66, -0.92);
+    ear.rotation.z = side * -0.55;
+    deer.add(ear);
 
-  // 细长的腿
-  const legGeo = new THREE.CylinderGeometry(0.1, 0.08, 1.2, 6);
-  [[-0.4, 0.6, -0.7], [0.4, 0.6, -0.7], [-0.4, 0.6, 0.7], [0.4, 0.6, 0.7]].forEach(p => {
-    const leg = new THREE.Mesh(legGeo, deerMat);
-    leg.position.set(p[0], p[1], p[2]);
+    const antler = new THREE.Mesh(geos.cyl, mats.antler);
+    antler.scale.set(0.035, 0.72, 0.035);
+    antler.position.set(side * 0.18, 2.92, -0.98);
+    antler.rotation.z = side * -0.32;
+    deer.add(antler);
+
+    const tine = new THREE.Mesh(geos.cyl, mats.antler);
+    tine.scale.set(0.025, 0.34, 0.025);
+    tine.position.set(side * 0.28, 3.0, -1.04);
+    tine.rotation.z = side * -0.75;
+    deer.add(tine);
+  });
+
+  [[-0.3, -0.62], [0.3, -0.62], [-0.3, 0.62], [0.3, 0.62]].forEach(([lx, lz]) => {
+    const leg = new THREE.Mesh(geos.cyl, mats.deerBody);
+    leg.scale.set(0.08, 1.16, 0.08);
+    leg.position.set(lx, 0.6, lz);
     deer.add(leg);
+
+    const hoof = new THREE.Mesh(geos.cyl, mats.hoof);
+    hoof.scale.set(0.085, 0.12, 0.085);
+    hoof.position.set(lx, 0.06, lz);
+    deer.add(hoof);
   });
 
   return deer;
 }
 
-// 3. 田园农庄木屋 (Farm Cabin)
+// 3. 精致田园农庄木屋 (Farm Cabin)
 function createFarmCabin() {
   const cabin = new THREE.Group();
-  // 墙体
-  const wallMat = new THREE.MeshStandardMaterial({ color: 0xd4a373, roughness: 0.8 });
-  const walls = new THREE.Mesh(new THREE.BoxGeometry(6.0, 3.5, 5.0), wallMat);
-  walls.position.y = 1.75;
+  const { mats, geos } = SCENERY_ASSETS;
+
+  const base = new THREE.Mesh(geos.box, mats.stone);
+  base.scale.set(6.3, 0.45, 5.3);
+  base.position.y = 0.225;
+  cabin.add(base);
+
+  const walls = new THREE.Mesh(geos.box, mats.woodWall);
+  walls.scale.set(5.9, 3.2, 4.9);
+  walls.position.y = 2.05;
   cabin.add(walls);
 
-  // 三角红色屋顶
-  const roofMat = new THREE.MeshStandardMaterial({ color: 0xba181b, roughness: 0.6 });
-  const roofGeo = new THREE.ConeGeometry(5.0, 2.4, 4);
-  roofGeo.rotateY(Math.PI / 4);
-  const roof = new THREE.Mesh(roofGeo, roofMat);
-  roof.position.y = 4.7;
+  [[-2.95, -2.45], [2.95, -2.45], [-2.95, 2.45], [2.95, 2.45]].forEach(([px, pz]) => {
+    const post = new THREE.Mesh(geos.box, mats.woodDark);
+    post.scale.set(0.24, 3.3, 0.24);
+    post.position.set(px, 2.05, pz);
+    cabin.add(post);
+  });
+
+  const roof = new THREE.Mesh(geos.cabinRoof, mats.cabinRoof);
+  roof.position.y = 3.62;
   cabin.add(roof);
 
-  // 烟囱
-  const chimney = new THREE.Mesh(
-    new THREE.BoxGeometry(0.6, 1.8, 0.6),
-    new THREE.MeshStandardMaterial({ color: 0x555555 })
-  );
-  chimney.position.set(1.5, 5.2, 0.8);
+  const ridge = new THREE.Mesh(geos.box, mats.woodDark);
+  ridge.scale.set(0.22, 0.2, 5.7);
+  ridge.position.set(0, 5.82, 0);
+  cabin.add(ridge);
+
+  const chimney = new THREE.Mesh(geos.box, mats.stone);
+  chimney.scale.set(0.68, 1.6, 0.68);
+  chimney.position.set(1.5, 5.2, 1.0);
   cabin.add(chimney);
+
+  const door = new THREE.Mesh(geos.box, mats.woodDark);
+  door.scale.set(1.15, 2.15, 0.14);
+  door.position.set(0, 1.5, -2.46);
+  cabin.add(door);
+
+  const step = new THREE.Mesh(geos.box, mats.stone);
+  step.scale.set(1.5, 0.22, 0.6);
+  step.position.set(0, 0.11, -2.85);
+  cabin.add(step);
+
+  [-1.75, 1.75].forEach(wx => {
+    const frame = new THREE.Mesh(geos.box, mats.windowFrame);
+    frame.scale.set(1.12, 1.02, 0.12);
+    frame.position.set(wx, 2.25, -2.46);
+    cabin.add(frame);
+
+    const glass = new THREE.Mesh(geos.box, mats.windowGlow);
+    glass.scale.set(0.92, 0.82, 0.14);
+    glass.position.set(wx, 2.25, -2.47);
+    cabin.add(glass);
+  });
 
   return cabin;
 }
 
-// 4. 转动的慢速风车 (Windmill)
+// 4. 荷兰风车 (带木格栅与帆布风叶)
 function createWindmill() {
   const mill = new THREE.Group();
-  const tower = new THREE.Mesh(
-    new THREE.CylinderGeometry(1.6, 2.6, 9.0, 8),
-    new THREE.MeshStandardMaterial({ color: 0xede0d4, roughness: 0.8 })
-  );
-  tower.position.y = 4.5;
+  const { mats, geos } = SCENERY_ASSETS;
+
+  const plinth = new THREE.Mesh(geos.cyl, mats.stone);
+  plinth.scale.set(2.75, 1.2, 2.75);
+  plinth.position.y = 0.6;
+  mill.add(plinth);
+
+  const tower = new THREE.Mesh(new THREE.CylinderGeometry(1.55, 2.55, 8.2, 10), mats.millTower);
+  tower.position.y = 5.2;
   mill.add(tower);
 
-  const cap = new THREE.Mesh(
-    new THREE.ConeGeometry(2.0, 2.2, 8),
-    new THREE.MeshStandardMaterial({ color: 0x3a5a40 })
-  );
-  cap.position.y = 10.1;
+  const cap = new THREE.Mesh(new THREE.ConeGeometry(1.95, 2.3, 10), mats.millCap);
+  cap.position.y = 10.4;
   mill.add(cap);
 
-  // 4 叶风车轮
-  const fanGroup = new THREE.Group();
-  fanGroup.position.set(0, 9.5, -1.9);
+  const door = new THREE.Mesh(geos.box, mats.woodDark);
+  door.scale.set(1.1, 1.9, 0.35);
+  door.position.set(0, 1.0, -2.5);
+  mill.add(door);
 
-  const bladeMat = new THREE.MeshStandardMaterial({ color: 0xfefae0 });
+  [4.4, 6.8].forEach(wy => {
+    const win = new THREE.Mesh(geos.box, mats.windowGlow);
+    win.scale.set(0.65, 0.78, 0.25);
+    win.position.set(0, wy, -2.1 + (wy - 4.4) * 0.12);
+    mill.add(win);
+  });
+
+  const fanGroup = new THREE.Group();
+  fanGroup.position.set(0, 9.6, -1.85);
+
+  const hub = new THREE.Mesh(geos.cyl, mats.woodDark);
+  hub.scale.set(0.32, 0.75, 0.32);
+  hub.rotation.x = Math.PI / 2;
+  fanGroup.add(hub);
+
   for (let i = 0; i < 4; i++) {
-    const blade = new THREE.Mesh(new THREE.BoxGeometry(0.3, 5.5, 0.08), bladeMat);
-    blade.position.y = 2.4;
     const bHolder = new THREE.Group();
     bHolder.rotation.z = (i * Math.PI) / 2;
-    bHolder.add(blade);
+
+    const spar = new THREE.Mesh(geos.box, mats.woodDark);
+    spar.scale.set(0.18, 5.4, 0.12);
+    spar.position.y = 2.7;
+    bHolder.add(spar);
+
+    const sail = new THREE.Mesh(geos.box, mats.millSail);
+    sail.scale.set(0.95, 4.1, 0.05);
+    sail.position.set(0.52, 3.25, 0.02);
+    bHolder.add(sail);
+
     fanGroup.add(bHolder);
   }
   mill.add(fanGroup);
@@ -1275,46 +1499,114 @@ function createWindmill() {
   return mill;
 }
 
-// 5. 乡村大树
+// 5. 多层树冠自然大树 (Tree)
 function createTree() {
   const tree = new THREE.Group();
-  const trunk = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.35, 0.5, 3.5, 7),
-    new THREE.MeshStandardMaterial({ color: 0x5c4033, roughness: 0.9 })
-  );
-  trunk.position.y = 1.75;
+  const { mats, geos } = SCENERY_ASSETS;
+
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.56, 3.8, 8), mats.bark);
+  trunk.position.y = 1.9;
   tree.add(trunk);
 
-  const leaves = new THREE.Mesh(
-    new THREE.DodecahedronGeometry(2.4, 1),
-    new THREE.MeshStandardMaterial({ color: 0x38761d, roughness: 0.8 })
-  );
-  leaves.position.y = 4.4;
-  tree.add(leaves);
+  [-1, 1].forEach((side, idx) => {
+    const branch = new THREE.Mesh(geos.cyl, mats.bark);
+    branch.scale.set(0.14, 1.5, 0.14);
+    branch.position.set(side * 0.45, 3.4 + idx * 0.25, side * 0.15);
+    branch.rotation.z = side * -0.55;
+    tree.add(branch);
+  });
+
+  const crowns = [
+    [0, 5.2, 0, 2.05, mats.leafDark],
+    [-1.05, 4.4, 0.55, 1.48, mats.leafMid],
+    [1.08, 4.55, -0.45, 1.52, mats.leafMid],
+    [0.15, 6.2, 0.2, 1.35, mats.leafLight]
+  ];
+  crowns.forEach(([cx, cy, cz, r, material]) => {
+    const foliage = new THREE.Mesh(geos.foliage, material);
+    foliage.scale.set(r, r * 0.85, r);
+    foliage.position.set(cx, cy, cz);
+    foliage.rotation.set(cx, cy, cz);
+    tree.add(foliage);
+  });
+
   return tree;
 }
 
-// 6. 热带海岛椰子树
+// 6. 弯曲树干与弧形羽叶椰子树 (Palm)
 function createPalm() {
   const palm = new THREE.Group();
-  const trunk = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.28, 0.55, 6.5, 7),
-    new THREE.MeshStandardMaterial({ color: 0x8b6f47, roughness: 0.9 })
-  );
-  trunk.position.y = 3.25;
-  palm.add(trunk);
+  const { mats, geos } = SCENERY_ASSETS;
 
-  for (let i = 0; i < 6; i++) {
-    const leaf = new THREE.Mesh(
-      new THREE.ConeGeometry(0.9, 4.0, 4),
-      new THREE.MeshStandardMaterial({ color: 0x2d6a4f, roughness: 0.7 })
-    );
-    leaf.position.set(0, 6.3, 0);
-    leaf.rotation.z = Math.PI / 2.8;
-    leaf.rotation.y = (i / 6) * Math.PI * 2;
-    palm.add(leaf);
+  let curX = 0;
+  let curY = 0;
+  for (let s = 0; s < 6; s++) {
+    const segH = 1.12;
+    const lean = s * 0.055;
+    const rBot = 0.46 - s * 0.045;
+    const rTop = rBot - 0.04;
+    const seg = new THREE.Mesh(new THREE.CylinderGeometry(rTop, rBot, segH, 7), mats.palmBark);
+    curX += Math.sin(lean) * 0.45;
+    curY += segH * 0.94;
+    seg.position.set(curX, curY - segH * 0.45, 0);
+    seg.rotation.z = -lean;
+    palm.add(seg);
   }
+
+  const crownCenter = new THREE.Group();
+  crownCenter.position.set(curX + 0.12, curY + 0.1, 0);
+  for (let c = 0; c < 3; c++) {
+    const nut = new THREE.Mesh(geos.sphere, mats.coconut);
+    nut.scale.set(0.24, 0.28, 0.24);
+    const a = (c / 3) * Math.PI * 2;
+    nut.position.set(Math.cos(a) * 0.34, -0.22, Math.sin(a) * 0.34);
+    crownCenter.add(nut);
+  }
+
+  for (let i = 0; i < 8; i++) {
+    const frondGroup = new THREE.Group();
+    frondGroup.rotation.y = (i / 8) * Math.PI * 2 + (i % 2) * 0.15;
+
+    const inner = new THREE.Mesh(geos.box, mats.palmLeaf);
+    inner.scale.set(0.55, 0.08, 2.2);
+    inner.position.set(0, 0.25, 1.05);
+    inner.rotation.x = -0.22;
+    frondGroup.add(inner);
+
+    const outer = new THREE.Mesh(geos.cone, mats.palmLeaf);
+    outer.scale.set(0.38, 2.0, 0.12);
+    outer.position.set(0, -0.1, 2.85);
+    outer.rotation.x = Math.PI / 2 + 0.48;
+    frondGroup.add(outer);
+
+    crownCenter.add(frondGroup);
+  }
+  palm.add(crownCenter);
   return palm;
+}
+
+// 7. 辅助自然元素（麦草垛 / 峡谷岩石）
+function createHayBale() {
+  const g = new THREE.Group();
+  const { mats, geos } = SCENERY_ASSETS;
+  const bale = new THREE.Mesh(geos.hayRoll, mats.hay);
+  bale.position.y = 0.95;
+  g.add(bale);
+  return g;
+}
+
+function createCanyonRock() {
+  const g = new THREE.Group();
+  const { mats, geos } = SCENERY_ASSETS;
+  const main = new THREE.Mesh(geos.foliage, mats.canyonRock);
+  main.scale.set(1.8, 1.35, 1.5);
+  main.position.y = 0.85;
+  g.add(main);
+  const sub = new THREE.Mesh(geos.foliage, mats.canyonRockDark);
+  sub.scale.set(1.1, 0.85, 1.1);
+  sub.position.set(1.2, 0.55, 0.5);
+  g.add(sub);
+  return g;
 }
 
 // ═══════════════════════════════════════
@@ -1344,114 +1636,159 @@ function makeNameTag(text) {
   return sprite;
 }
 
+const CAR_ASSETS = (() => {
+  const bodyShape = new THREE.Shape();
+  bodyShape.moveTo(-2.35, 0.22);
+  bodyShape.lineTo(2.22, 0.22);
+  bodyShape.lineTo(2.3, 0.44);
+  bodyShape.lineTo(2.18, 0.72);
+  bodyShape.lineTo(1.28, 0.86);
+  bodyShape.lineTo(0.45, 1.32);
+  bodyShape.lineTo(-0.72, 1.34);
+  bodyShape.lineTo(-1.42, 0.86);
+  bodyShape.lineTo(-2.22, 0.68);
+  bodyShape.lineTo(-2.42, 0.42);
+  bodyShape.closePath();
+
+  const bodyGeo = new THREE.ExtrudeGeometry(bodyShape, {
+    depth: 1.72,
+    bevelEnabled: true,
+    bevelThickness: 0.11,
+    bevelSize: 0.08,
+    bevelSegments: 3
+  });
+  bodyGeo.rotateY(Math.PI / 2);
+  bodyGeo.translate(-0.86, 0, -1.35);
+
+  const cabinShape = new THREE.Shape();
+  cabinShape.moveTo(-1.32, 0.85);
+  cabinShape.lineTo(1.16, 0.85);
+  cabinShape.lineTo(0.42, 1.31);
+  cabinShape.lineTo(-0.68, 1.33);
+  cabinShape.closePath();
+
+  const cabinGeo = new THREE.ExtrudeGeometry(cabinShape, {
+    depth: 1.44,
+    bevelEnabled: true,
+    bevelThickness: 0.06,
+    bevelSize: 0.04,
+    bevelSegments: 2
+  });
+  cabinGeo.rotateY(Math.PI / 2);
+  cabinGeo.translate(-0.72, 0, -1.35);
+
+  const tireGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.32, 20);
+  tireGeo.rotateZ(Math.PI / 2);
+  const rimGeo = new THREE.CylinderGeometry(0.28, 0.28, 0.33, 14);
+  rimGeo.rotateZ(Math.PI / 2);
+  const spokeGeo = new THREE.BoxGeometry(0.34, 0.48, 0.06);
+  const hubGeo = new THREE.CylinderGeometry(0.09, 0.09, 0.35, 10);
+  hubGeo.rotateZ(Math.PI / 2);
+
+  return {
+    bodyGeo,
+    cabinGeo,
+    tireGeo,
+    rimGeo,
+    spokeGeo,
+    hubGeo,
+    box: new THREE.BoxGeometry(1, 1, 1),
+    glassMat: new THREE.MeshStandardMaterial({ color: 0x0b1322, roughness: 0.08, metalness: 0.9 }),
+    trimMat: new THREE.MeshStandardMaterial({ color: 0x1d2026, roughness: 0.65, metalness: 0.4 }),
+    tireMat: new THREE.MeshStandardMaterial({ color: 0x17181c, roughness: 0.9 }),
+    rimMat: new THREE.MeshStandardMaterial({ color: 0x9aa4b2, metalness: 0.85, roughness: 0.28 }),
+    hubMat: new THREE.MeshStandardMaterial({ color: 0x2a2f38, metalness: 0.8, roughness: 0.35 }),
+    hlMat: new THREE.MeshBasicMaterial({ color: 0xf4fbff }),
+    tailMat: new THREE.MeshBasicMaterial({ color: 0xff2238 }),
+    plateMat: new THREE.MeshBasicMaterial({ color: 0xd9ecff })
+  };
+})();
+
 function createTeslaCar(isPlayer = true, colorHex = 0xffffff) {
   const carGroup = new THREE.Group();
-  carGroup.userData.paintMaterial = null;   // 后面按服务器分配的颜色改车漆
 
-  // 高级纯电烤漆车漆
   const paintMat = new THREE.MeshStandardMaterial({
     color: colorHex,
-    roughness: 0.25,
-    metalness: 0.7
+    roughness: 0.22,
+    metalness: 0.72
   });
   carGroup.userData.paintMaterial = paintMat;
 
-  // 特斯拉全景黑水晶天幕玻璃
-  const glassMat = new THREE.MeshStandardMaterial({
-    color: 0x0a101d,
-    roughness: 0.05,
-    metalness: 0.92
+  // 1. 雕刻感流线三厢车身
+  carGroup.add(new THREE.Mesh(CAR_ASSETS.bodyGeo, paintMat));
+
+  // 2. 全景熏黑玻璃座舱（前挡风 + 天幕 + 侧窗 + 后溜背）
+  carGroup.add(new THREE.Mesh(CAR_ASSETS.cabinGeo, CAR_ASSETS.glassMat));
+
+  // 3. 深色运动侧裙 / 尾部扩散器
+  const skirt = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
+  skirt.scale.set(1.94, 0.1, 4.46);
+  skirt.position.set(0, 0.21, -1.35);
+  carGroup.add(skirt);
+
+  const diffuser = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
+  diffuser.scale.set(1.55, 0.18, 0.14);
+  diffuser.position.set(0, 0.3, 0.96);
+  carGroup.add(diffuser);
+
+  // 4. 外后视镜 + 隐藏式门把手 + 前矩阵 LED 大灯
+  [-1, 1].forEach(side => {
+    const mirror = new THREE.Mesh(CAR_ASSETS.box, paintMat);
+    mirror.scale.set(0.22, 0.11, 0.16);
+    mirror.position.set(side * 1.02, 0.86, -2.02);
+    carGroup.add(mirror);
+
+    const handleF = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
+    handleF.scale.set(0.03, 0.04, 0.22);
+    handleF.position.set(side * 0.96, 0.72, -1.55);
+    carGroup.add(handleF);
+
+    const handleR = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
+    handleR.scale.set(0.03, 0.04, 0.22);
+    handleR.position.set(side * 0.96, 0.72, -0.58);
+    carGroup.add(handleR);
+
+    const hl = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.hlMat);
+    hl.scale.set(0.36, 0.075, 0.1);
+    hl.position.set(side * 0.66, 0.56, -3.76);
+    hl.rotation.y = side * -0.14;
+    carGroup.add(hl);
   });
 
-  // 深色底盘工程塑料
-  const trimMat = new THREE.MeshStandardMaterial({
-    color: 0x22242b,
-    roughness: 0.6,
-    metalness: 0.5
-  });
+  // 5. 贯穿式 LED 尾灯 + 牌照框
+  const tailBar = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.tailMat);
+  tailBar.scale.set(1.68, 0.075, 0.08);
+  tailBar.position.set(0, 0.68, 0.96);
+  carGroup.add(tailBar);
 
-  // ───── 核心物理布局：后轮在 Z = 0，前轮在 Z = -2.7 ─────
-  // 1. 下底盘主结构 (平整低风阻滑板底盘)
-  const chassis = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 14), paintMat);
-  chassis.scale.set(1.08, 0.34, 2.3);
-  chassis.position.set(0, 0.52, -1.35); // 圆润底盘中心位于前后轮中点
-  chassis.castShadow = true;
-  carGroup.add(chassis);
+  const plate = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.plateMat);
+  plate.scale.set(0.52, 0.14, 0.04);
+  plate.position.set(0, 0.46, 0.98);
+  carGroup.add(plate);
 
-  // 2. 特斯拉一体式无格栅平滑流线车头 (Aerodynamic Closed Front)
-  const frontNose = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 12), paintMat);
-  frontNose.scale.set(0.93, 0.18, 0.72);
-  frontNose.position.set(0, 0.46, -3.25);
-  frontNose.rotation.x = 0.12; // 下探低风阻斜面
-  frontNose.castShadow = true;
-  carGroup.add(frontNose);
-
-  // 3. 优雅圆润溜背驾驶舱与全景天幕玻璃 (Fastback Glass Canopy)
-  const cabin = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 14), glassMat);
-  cabin.scale.set(0.76, 0.42, 1.38);
-  cabin.position.set(0, 0.93, -1.35);
-  cabin.castShadow = true;
-  carGroup.add(cabin);
-
-  // 4. 前后车顶立柱与流线线条
-  const roof = new THREE.Mesh(new THREE.BoxGeometry(1.35, 0.06, 1.6), paintMat);
-  roof.position.set(0, 1.15, -1.35);
-  carGroup.add(roof);
-
-  // 5. 特斯拉后视镜 (左右微型低风阻外后视镜)
-  const mirrorL = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.12, 0.15), paintMat);
-  mirrorL.position.set(-1.08, 0.82, -2.1);
-  carGroup.add(mirrorL);
-
-  const mirrorR = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.12, 0.15), paintMat);
-  mirrorR.position.set(1.08, 0.82, -2.1);
-  carGroup.add(mirrorR);
-
-  // 6. 前矩阵 LED 狭长大灯 (极简科技感，非赛车大灯)
-  const hlMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-  const hlL = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.08, 0.1), hlMat);
-  hlL.position.set(-0.7, 0.45, -3.75);
-  carGroup.add(hlL);
-
-  const hlR = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.08, 0.1), hlMat);
-  hlR.position.set(0.7, 0.45, -3.75);
-  carGroup.add(hlR);
-
-  // 7. 特斯拉贯穿式简洁红色尾灯 (极简平直尾部，无大尾翼！)
-  const tailMat = new THREE.MeshBasicMaterial({ color: 0xff1e32 });
-  const tail = new THREE.Mesh(new THREE.BoxGeometry(1.75, 0.08, 0.1), tailMat);
-  tail.position.set(0, 0.62, 0.88);
-  carGroup.add(tail);
-
-  // 8. 4 个特斯拉标准风刃轮毂轮组 (前轮独立转向 + 后轮无打角紧锁)
+  // 6. 4 个五辐风刃轮毂轮组 (后轮 Z = 0，前轮 Z = -2.7)
   const wheels = [];
-  const tireGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.32, 18);
-  tireGeo.rotateZ(Math.PI / 2);
-  const tireMat = new THREE.MeshStandardMaterial({ color: 0x18181c, roughness: 0.9 });
-  const rimMat = new THREE.MeshStandardMaterial({ color: 0x88929e, metalness: 0.85, roughness: 0.3 }); // 枪灰金属
-
-  // 精准坐标：后轮中心严格在 Z = 0！前轮中心严格在 Z = -2.7！
   const wheelPositions = [
-    [-1.02, 0.42, -2.7], // 前左 (转向轮)
-    [ 1.02, 0.42, -2.7], // 前右 (转向轮)
-    [-1.02, 0.42,  0.0], // 后左 (后轴中心，零漂移！)
-    [ 1.02, 0.42,  0.0]  // 后右 (后轴中心，零漂移！)
+    [-0.98, 0.42, -2.7],
+    [ 0.98, 0.42, -2.7],
+    [-0.98, 0.42,  0.0],
+    [ 0.98, 0.42,  0.0]
   ];
 
   wheelPositions.forEach((pos, idx) => {
-    // 转向节支架 (前轮转向 Y 轴)
     const steerGroup = new THREE.Group();
     steerGroup.position.set(pos[0], pos[1], pos[2]);
 
-    // 轮轴滚动
     const spinGroup = new THREE.Group();
-    const tire = new THREE.Mesh(tireGeo, tireMat);
-    spinGroup.add(tire);
+    spinGroup.add(new THREE.Mesh(CAR_ASSETS.tireGeo, CAR_ASSETS.tireMat));
+    spinGroup.add(new THREE.Mesh(CAR_ASSETS.rimGeo, CAR_ASSETS.hubMat));
 
-    // 特斯拉风刃轮毂盖
-    const aeroRim = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.26, 0.34, 12), rimMat);
-    aeroRim.rotation.z = Math.PI / 2;
-    spinGroup.add(aeroRim);
+    for (let s = 0; s < 5; s++) {
+      const spoke = new THREE.Mesh(CAR_ASSETS.spokeGeo, CAR_ASSETS.rimMat);
+      spoke.rotation.x = (s / 5) * Math.PI;
+      spinGroup.add(spoke);
+    }
+    spinGroup.add(new THREE.Mesh(CAR_ASSETS.hubGeo, CAR_ASSETS.rimMat));
 
     steerGroup.add(spinGroup);
     carGroup.add(steerGroup);
@@ -1725,21 +2062,25 @@ function applyTheme(themeKey) {
     const rand = Math.random();
 
     if (themeKey === "country") {
-      if (rand < 0.28) item = createCow();          // 呆萌小牛
-      else if (rand < 0.50) item = createDeer();     // 路边小鹿
-      else if (rand < 0.65) item = createWindmill(); // 旋转大风车
-      else if (rand < 0.80) item = createFarmCabin(); // 农庄小木屋
-      else item = createTree();                      // 树木
+      if (rand < 0.24) item = createCow();          // 写实奶牛
+      else if (rand < 0.44) item = createDeer();     // 灵动梅花鹿
+      else if (rand < 0.58) item = createWindmill(); // 荷兰风车
+      else if (rand < 0.72) item = createFarmCabin(); // 农庄木屋
+      else if (rand < 0.84) item = createHayBale();  // 田园麦草垛
+      else item = createTree();                      // 多层自然大树
     } else if (themeKey === "island") {
-      if (rand < 0.35) item = createDeer();
-      else if (rand < 0.55) item = createWindmill();
+      if (rand < 0.25) item = createDeer();
+      else if (rand < 0.42) item = createWindmill();
+      else if (rand < 0.56) item = createCanyonRock();
       else item = createPalm();
     } else if (themeKey === "jungle") {
-      if (rand < 0.4) item = createDeer();
+      if (rand < 0.35) item = createDeer();
+      else if (rand < 0.50) item = createCanyonRock();
       else item = createTree();
     } else {
-      if (rand < 0.3) item = createCow();
-      else if (rand < 0.6) item = createFarmCabin();
+      if (rand < 0.22) item = createCow();
+      else if (rand < 0.45) item = createFarmCabin();
+      else if (rand < 0.72) item = createCanyonRock();
       else item = createTree();
     }
 
@@ -1954,6 +2295,7 @@ function startGame() {
 function finishRace() {
   if (!running) return;
   running = false;
+  clearActiveRoom();
   sound.stopBGM();
   title.textContent = "冲过终点！";
   if (!bestTime || raceTime < bestTime) {
@@ -2002,6 +2344,7 @@ function finishRace() {
 function forceEndRace() {
   if (!running) return;
   running = false;
+  clearActiveRoom();
   sound.stopBGM();
   const other = raceSync.other;
   title.textContent = "比赛结束";
@@ -2373,6 +2716,19 @@ function update() {
     }
   }
 
+  // 双方联机车辆同世界实体碰撞与减速（不穿过对手）
+  if (roomCode && remoteCar && remoteCar.group.visible && raceSync.other) {
+    if (vehiclesOverlap(player, remoteCar) && registerPlayerImpact(remoteCar, Date.now())) {
+      baseSpeed = reduceSpeedAfterImpact(baseSpeed);
+      const pushDir = player.group.position.x >= remoteCar.group.position.x ? 1 : -1;
+      carPhysics.x = Math.max(-(ROAD_WIDTH / 2 - 1.8), Math.min(ROAD_WIDTH / 2 - 1.8, carPhysics.x + pushDir * 0.45));
+      showImpact("双车擦碰 · 减速", remoteCar.group.position.x, remoteCar.group.position.z, true);
+      sound.playCrash();
+      triggerHaptic([60, 40, 80]);
+      cameraTrauma = Math.min(1, cameraTrauma + 0.55);
+    }
+  }
+
   // 6. 金币收集
   for (let i = coins.length - 1; i >= 0; i--) {
     const coin = coins[i];
@@ -2680,12 +3036,17 @@ window.addEventListener("resize", () => {
 // 场景切换
 document.querySelectorAll(".theme-chip").forEach(chip => {
   chip.addEventListener("click", () => {
+    if (roomCode && !raceSync.isHost) return;
     applyTheme(chip.dataset.theme);
   });
 });
 
 if (quickSceneSelect) {
   quickSceneSelect.addEventListener("change", (e) => {
+    if (roomCode && !raceSync.isHost) {
+      e.target.value = currentTheme;
+      return;
+    }
     applyTheme(e.target.value);
   });
 }
@@ -2794,3 +3155,13 @@ layoutMinimap();
 window.addEventListener("resize", () => layoutMinimap());
 loadLeaderboard();
 render();
+
+// 若此前在房间对局中意外退出/刷新页面，自动尝试重连回原房间
+const pendingSavedRoom = loadActiveRoom();
+if (pendingSavedRoom) {
+  const inputEl = document.querySelector("#roomCodeInput");
+  if (inputEl) inputEl.value = pendingSavedRoom.roomCode;
+  enterRaceRoom(pendingSavedRoom.roomCode, pendingSavedRoom.isHost ? "create" : "join").catch(() => {
+    clearActiveRoom();
+  });
+}
