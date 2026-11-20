@@ -459,9 +459,15 @@ const server = http.createServer(async (request, response) => {
         player.ready = Boolean(body.ready);
         maybeStartCountdown(room);
       } else if (isRaceDriving(room) && !player.inRace) {
-        // 对手仍在跑时，自己点「准备」直接开启 3 秒个人发车倒计时，无需对方退回准备！
+        // 对手仍在跑时，自己点「准备」无需倒计时，直接从原位置立即回到赛道！
         player.ready = Boolean(body.ready);
-        player.resumeStartAt = player.ready ? Date.now() + 3000 : 0;
+        if (player.ready) {
+          player.inRace = true;
+          player.resumeStartAt = 0;
+          player.exitedLobbyAt = 0;
+          return sendJson(response, 200, { ...buildRoomSyncPayload(room, player.id), instantResume: true });
+        }
+        player.resumeStartAt = 0;
       }
       return sendJson(response, 200, buildRoomSyncPayload(room, player.id));
     }

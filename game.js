@@ -433,6 +433,7 @@ async function leaveRaceRoom(silent = false, keepResume = false) {
   renderRoomSlots();
   setRoomBadge("");
   updateStartButtonForRoom();
+  loadLeaderboard();
   if (!silent) {
     const joinBtnEl = document.querySelector("#joinRoom");
     if (!keepResume) {
@@ -609,12 +610,14 @@ function updateRoomLobbyStatus(overrideText = "") {
   }
   if (raceSync.otherInRace) {
     status.textContent = resumeDist > 0
-      ? `房号 ${roomCode} · 对手已准备（比赛中），点「点击准备」倒计时从 ${resumeDist}m 回到原位`
-      : `房号 ${roomCode} · 对手已准备（比赛中），你点「点击准备」倒计时就能直接进入`;
+      ? `房号 ${roomCode} · 对手已准备（比赛中），点「点击准备」直接从 ${resumeDist}m 回到原位`
+      : `房号 ${roomCode} · 对手已准备（比赛中），你点「点击准备」直接就能进入`;
+    renderRoomLiveRanking();
     return;
   }
   if (count < 2) {
     status.textContent = `房号 ${roomCode} · 让好友输此号点「进入」，两人都点「准备」开局`;
+    renderRoomLiveRanking();
     return;
   }
   if (raceSync.myReady && raceSync.otherReady) {
@@ -626,6 +629,7 @@ function updateRoomLobbyStatus(overrideText = "") {
       ? `房号 ${roomCode} · 房主可改赛道/距离/难度，两人点下方准备即开局`
       : `房号 ${roomCode} · 一切设置由房主决定，点下方「点击准备」`;
   }
+  renderRoomLiveRanking();
 }
 
 function updateStartButtonForRoom() {
@@ -663,7 +667,7 @@ function updateStartButtonForRoom() {
     btn.textContent = "✓ 已准备（再点取消）";
   } else if (raceSync.otherInRace) {
     btn.classList.add("ready-prompt");
-    btn.textContent = resumeDist > 0 ? `点击准备 · 从 ${resumeDist}m 续跑！` : "点击准备 · 立刻进入！";
+    btn.textContent = resumeDist > 0 ? `点击准备 · 直接从 ${resumeDist}m 续跑！` : "点击准备 · 直接进入！";
   } else if (count >= 2 && raceSync.otherReady) {
     btn.classList.add("ready-prompt");
     btn.textContent = "点击准备 · 立刻开局！";
@@ -867,6 +871,15 @@ function applyRaceStart(payload) {
     if (!running && !raceSync.launched && payload.raceDriving === false && Number(payload.startAt || 0) === 0 && raceSync.resumeState) {
       raceSync.resumeState = null;
     }
+    // 中途退出/刷新后重新点「准备」回归进行中的比赛：无需倒计时，直接从原位置进入！
+    if (
+      !raceSync.launched && !running &&
+      Date.now() >= (raceSync.exitGuardUntil || 0) &&
+      (payload.instantResume || (payload.raceDriving && payload.myReady && payload.myInRace))
+    ) {
+      launchMultiRace();
+      return;
+    }
     if (!raceSync.isHost && nextVer > 0 && raceSync.configVersion > 0 && nextVer !== raceSync.configVersion && !raceSync.launched) {
       raceSync.configChangedNotice = true;
     }
@@ -1044,7 +1057,10 @@ function launchMultiRace() {
   } else {
     setRacePaused(false);
   }
-  if (roomCode && roomPlayerId) syncRaceRoom();
+  if (roomCode && roomPlayerId) {
+    renderRoomLiveRanking();
+    syncRaceRoom();
+  }
 }
 
 let syncInFlight = false;
@@ -1239,6 +1255,7 @@ function refreshGapHud() {
   const status = document.querySelector("#roomStatus");
   if (status) status.textContent = `房间 ${roomCode} · 对手：${rivalLabel} · ${badgeText}`;
   setRoomBadge(roomCode, false, badgeText);
+  renderRoomLiveRanking();
 }
 
 // 对手在视野外时，用屏幕提示标出他在前还是在后、差多少米
@@ -1687,7 +1704,7 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: !isMobileDevice, p
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, isMobileDevice ? 1.0 : 1.5));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.0;
+renderer.toneMappingExposure = 1.04;
 renderer.shadowMap.enabled = !isMobileDevice;   // 手机端关阴影，帧率优先
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
@@ -1714,10 +1731,10 @@ camera.updateProjectionMatrix();
 camera.position.set(0, initCamFraming.baseY, initCamFraming.baseZ);
 camera.lookAt(0, initCamFraming.lookY, -16);
 
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.90);
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.38);
 scene.add(ambientLight);
 
-const sunLight = new THREE.DirectionalLight(0xfffaea, 1.55);
+const sunLight = new THREE.DirectionalLight(0xfff7e2, 1.50);
 sunLight.position.set(28, 52, 22);
 sunLight.castShadow = true;
 sunLight.shadow.mapSize.set(1024, 1024);
@@ -1729,7 +1746,7 @@ sunLight.shadow.bias = -0.0006;
 scene.add(sunLight);
 scene.add(sunLight.target);
 
-const skyLight = new THREE.HemisphereLight(0xbfe6ff, 0x31512d, 0.85);
+const skyLight = new THREE.HemisphereLight(0xbfe8ff, 0x2a4528, 0.56);
 scene.add(skyLight);
 
 let cameraTrauma = 0;
@@ -1827,62 +1844,62 @@ const THEMES = {
   country: {
     name: "乡间小路",
     cnName: "🌾 乡间小路",
-    skyColor: 0x82b8f5,
-    fogColor: 0xb5dca5,
-    fogDensity: 0.0044,
-    ambientColor: 0xffffff,
-    sunColor: 0xfff6dd,
-    sunIntensity: 1.55,
-    roadColor: 0x3b3f47,
-    roadRoughness: 0.78,
-    terrainColor: 0x5c9b46,
+    skyColor: 0x4ea3f5,
+    fogColor: 0xaad8bc,
+    fogDensity: 0.0023,
+    ambientColor: 0xf4f8ff,
+    sunColor: 0xfff3d4,
+    sunIntensity: 1.50,
+    roadColor: 0x262c35,
+    roadRoughness: 0.58,
+    terrainColor: 0x4c8c3d,
     stripeColor: 0xffffff,
     railColor: 0x8b5a2b
   },
   island: {
     name: "逃离荒岛",
     cnName: "🏝️ 逃离荒岛",
-    skyColor: 0x38b6ff,
-    fogColor: 0x6be0d5,
-    fogDensity: 0.0044,
-    ambientColor: 0xe0f7fa,
-    sunColor: 0xfff0b3,
-    sunIntensity: 1.70,
-    roadColor: 0x454c57,
-    roadRoughness: 0.62,
-    terrainColor: 0xe6d49f,
+    skyColor: 0x1ea4f8,
+    fogColor: 0x7ce3e0,
+    fogDensity: 0.0021,
+    ambientColor: 0xdff8ff,
+    sunColor: 0xffefb0,
+    sunIntensity: 1.62,
+    roadColor: 0x2c3440,
+    roadRoughness: 0.54,
+    terrainColor: 0xe2cc8d,
     stripeColor: 0xffea00,
     railColor: 0xdbe6f0
   },
   jungle: {
     name: "丛林狂飙",
     cnName: "🌴 丛林狂飙",
-    skyColor: 0x1e4c34,
-    fogColor: 0x2d664b,
-    fogDensity: 0.0064,
-    ambientColor: 0xa7d7c5,
-    sunColor: 0xd4ffd4,
-    sunIntensity: 1.45,
-    roadColor: 0x2f2922,
-    roadRoughness: 0.86,
-    terrainColor: 0x1e4d31,
-    stripeColor: 0x88d49e,
-    railColor: 0x4d3423
+    skyColor: 0x1a543a,
+    fogColor: 0x2e6f52,
+    fogDensity: 0.0036,
+    ambientColor: 0xa0d6be,
+    sunColor: 0xd8ffd4,
+    sunIntensity: 1.48,
+    roadColor: 0x221f1a,
+    roadRoughness: 0.66,
+    terrainColor: 0x1e5133,
+    stripeColor: 0x98e6ab,
+    railColor: 0x543824
   },
   river: {
     name: "沿河峡谷",
     cnName: "🌊 沿河峡谷",
-    skyColor: 0x628ec9,
-    fogColor: 0x9ed4ee,
-    fogDensity: 0.0048,
-    ambientColor: 0xdde5ed,
-    sunColor: 0xffffff,
-    sunIntensity: 1.60,
-    roadColor: 0x363a42,
-    roadRoughness: 0.68,
-    terrainColor: 0x9c674e,
+    skyColor: 0x3b82d6,
+    fogColor: 0x98d1f0,
+    fogDensity: 0.0024,
+    ambientColor: 0xdce8f4,
+    sunColor: 0xfff8e8,
+    sunIntensity: 1.56,
+    roadColor: 0x242b35,
+    roadRoughness: 0.56,
+    terrainColor: 0x966047,
     stripeColor: 0xffffff,
-    railColor: 0x6eb6d4
+    railColor: 0x56a8cc
   }
 };
 
@@ -2178,14 +2195,14 @@ function makeSkyDomeTexture(themeKey, theme) {
   c.width = 1024;
   c.height = 512;
   const g = c.getContext("2d");
-  const topCol = new THREE.Color(theme.skyColor).multiplyScalar(0.76);
+  const topCol = new THREE.Color(theme.skyColor).multiplyScalar(0.62);
   const midCol = new THREE.Color(theme.skyColor);
-  const fogCol = new THREE.Color(theme.fogColor).lerp(new THREE.Color(0xfff6e5), 0.25);
+  const warmHorizon = new THREE.Color(theme.fogColor).lerp(new THREE.Color(0xfff4d9), 0.32);
 
-  const grad = g.createLinearGradient(0, 0, 0, 320);
+  const grad = g.createLinearGradient(0, 0, 0, 340);
   grad.addColorStop(0.0, "#" + topCol.getHexString());
-  grad.addColorStop(0.48, "#" + midCol.getHexString());
-  grad.addColorStop(0.84, "#" + fogCol.getHexString());
+  grad.addColorStop(0.45, "#" + midCol.getHexString());
+  grad.addColorStop(0.80, "#" + warmHorizon.getHexString());
   grad.addColorStop(1.0, "#" + new THREE.Color(theme.fogColor).getHexString());
   g.fillStyle = grad;
   g.fillRect(0, 0, 1024, 512);
@@ -2792,13 +2809,12 @@ function makeNameTag(text) {
 
 const CAR_ASSETS = (() => {
   const bodyShape = new THREE.Shape();
+  // 车身主体仅构建低趴腰线与肌肉轮拱，让上方全景熏黑玻璃座舱完整显露、告别“实心白块”感
   bodyShape.moveTo(-2.35, 0.22);
   bodyShape.lineTo(2.22, 0.22);
-  bodyShape.quadraticCurveTo(2.38, 0.34, 2.26, 0.66);
-  bodyShape.quadraticCurveTo(1.88, 0.82, 1.32, 0.88);
-  bodyShape.quadraticCurveTo(0.88, 1.24, 0.45, 1.33);
-  bodyShape.quadraticCurveTo(-0.18, 1.39, -0.74, 1.33);
-  bodyShape.quadraticCurveTo(-1.12, 1.12, -1.46, 0.88);
+  bodyShape.quadraticCurveTo(2.38, 0.34, 2.26, 0.68);
+  bodyShape.quadraticCurveTo(1.94, 0.84, 1.32, 0.86);
+  bodyShape.lineTo(-1.38, 0.86);
   bodyShape.quadraticCurveTo(-1.98, 0.78, -2.28, 0.64);
   bodyShape.quadraticCurveTo(-2.46, 0.45, -2.35, 0.22);
   bodyShape.closePath();
@@ -2808,30 +2824,31 @@ const CAR_ASSETS = (() => {
     curveSegments: 10,
     bevelEnabled: true,
     bevelThickness: 0.12,
-    bevelSize: 0.09,
+    bevelSize: 0.08,
     bevelSegments: 4
   });
   bodyGeo.rotateY(Math.PI / 2);
   bodyGeo.translate(-0.86, 0, -1.35);
 
+  // 全景熏黑流线溜背玻璃座舱（高于车身腰线，前后挡风与天幕清晰反射天空与阳光）
   const cabinShape = new THREE.Shape();
-  cabinShape.moveTo(-1.34, 0.85);
-  cabinShape.lineTo(1.18, 0.85);
-  cabinShape.quadraticCurveTo(0.84, 1.22, 0.42, 1.31);
-  cabinShape.quadraticCurveTo(-0.18, 1.37, -0.68, 1.32);
-  cabinShape.quadraticCurveTo(-1.05, 1.12, -1.34, 0.85);
+  cabinShape.moveTo(-1.42, 0.84);
+  cabinShape.lineTo(1.32, 0.84);
+  cabinShape.quadraticCurveTo(0.96, 1.24, 0.48, 1.36);
+  cabinShape.quadraticCurveTo(-0.18, 1.44, -0.76, 1.37);
+  cabinShape.quadraticCurveTo(-1.14, 1.15, -1.42, 0.84);
   cabinShape.closePath();
 
   const cabinGeo = new THREE.ExtrudeGeometry(cabinShape, {
-    depth: 1.44,
-    curveSegments: 10,
+    depth: 1.46,
+    curveSegments: 12,
     bevelEnabled: true,
-    bevelThickness: 0.06,
-    bevelSize: 0.04,
+    bevelThickness: 0.07,
+    bevelSize: 0.05,
     bevelSegments: 3
   });
   cabinGeo.rotateY(Math.PI / 2);
-  cabinGeo.translate(-0.72, 0, -1.35);
+  cabinGeo.translate(-0.73, 0, -1.35);
 
   const tireGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.32, 20);
   tireGeo.rotateZ(Math.PI / 2);
@@ -2840,9 +2857,9 @@ const CAR_ASSETS = (() => {
   const spokeGeo = new THREE.BoxGeometry(0.34, 0.48, 0.06);
   const hubGeo = new THREE.CylinderGeometry(0.09, 0.09, 0.35, 10);
   hubGeo.rotateZ(Math.PI / 2);
-  const flameGeo = new THREE.ConeGeometry(0.18, 1.45, 10);
+  const flameGeo = new THREE.ConeGeometry(0.22, 1.95, 10);
   flameGeo.rotateX(Math.PI / 2);
-  flameGeo.translate(0, 0, 0.72);
+  flameGeo.translate(0, 0, 0.96);
 
   const archGeo = new THREE.TorusGeometry(0.51, 0.075, 8, 14, Math.PI);
   archGeo.rotateY(Math.PI / 2);
@@ -2876,8 +2893,8 @@ const CAR_ASSETS = (() => {
     tailMat: new THREE.MeshBasicMaterial({ color: 0xff2238 }),
     brakeCenterMat: new THREE.MeshBasicMaterial({ color: 0xff8c66 }),
     plateMat: new THREE.MeshBasicMaterial({ color: 0xd9ecff }),
-    flameOuterMat: new THREE.MeshBasicMaterial({ color: 0x38e8ff, transparent: true, opacity: 0.8 }),
-    flameInnerMat: new THREE.MeshBasicMaterial({ color: 0xe6ffff, transparent: true, opacity: 0.96 }),
+    flameOuterMat: new THREE.MeshBasicMaterial({ color: 0x00d9ff, transparent: true, opacity: 0.82, blending: THREE.AdditiveBlending, depthWrite: false }),
+    flameInnerMat: new THREE.MeshBasicMaterial({ color: 0xe8ffff, transparent: true, opacity: 0.96, blending: THREE.AdditiveBlending, depthWrite: false }),
     nitroSparkMat: new THREE.MeshBasicMaterial({ color: 0x5ceeff })
   };
 })();
@@ -2936,14 +2953,28 @@ function createTeslaCar(isPlayer = true, colorHex = 0xffffff) {
   carGroup.add(grille);
 
   const lipSpoiler = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
-  lipSpoiler.scale.set(1.66, 0.05, 0.14);
-  lipSpoiler.position.set(0, 0.89, 0.94);
+  lipSpoiler.scale.set(1.74, 0.05, 0.19);
+  lipSpoiler.position.set(0, 1.03, 0.88);
   carGroup.add(lipSpoiler);
+
+  [-0.56, 0.56].forEach(sx => {
+    const strut = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
+    strut.scale.set(0.06, 0.14, 0.14);
+    strut.position.set(sx, 0.95, 0.86);
+    carGroup.add(strut);
+  });
 
   const diffuser = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.trimMat);
   diffuser.scale.set(1.58, 0.18, 0.14);
   diffuser.position.set(0, 0.3, 0.96);
   carGroup.add(diffuser);
+
+  [-0.52, 0.52].forEach(ex => {
+    const pipe = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.chromeMat);
+    pipe.scale.set(0.16, 0.09, 0.12);
+    pipe.position.set(ex, 0.29, 1.0);
+    carGroup.add(pipe);
+  });
 
   const chromeTrimRear = new THREE.Mesh(CAR_ASSETS.box, CAR_ASSETS.chromeMat);
   chromeTrimRear.scale.set(1.12, 0.032, 0.04);
@@ -4641,7 +4672,7 @@ function update(dtScale = 1) {
     cameraTrauma = Math.max(0, cameraTrauma - 0.045 * dtScale);
   }
 
-  const targetFov = camFraming.baseFov + (boosting ? 6.2 : 0) + speedRatio * 3.0;
+  const targetFov = camFraming.baseFov + (boosting ? 8.5 : 0) + speedRatio * 4.2;
   camera.fov += (targetFov - camera.fov) * expEase(0.08);
   camera.updateProjectionMatrix();
 
@@ -4686,16 +4717,71 @@ function setServerState(online) {
   serverText.textContent = online ? "在线" : "单机";
 }
 
+function renderRoomLiveRanking() {
+  if (!leaderboardList) return;
+  const titleEl = document.querySelector("#leaderboardTitle");
+  if (!roomCode) {
+    if (titleEl) titleEl.textContent = "🏆 车王排行榜";
+    return;
+  }
+  if (titleEl) titleEl.textContent = "🏁 本局实时排名";
+  const myName = (playerNameInput?.value.trim() || playerName || localStorage.getItem("neonRacerName") || "我").slice(0, 10);
+  const mySavedDist = !running && raceSync.resumeState ? Number(raceSync.resumeState.distance || 0) : raceDistance;
+  const racers = [
+    {
+      name: myName,
+      mine: true,
+      distance: Math.max(0, Number(mySavedDist) || 0),
+      inRace: Boolean(running),
+      finished: Boolean(!running && raceDistance >= finishDistance),
+      finishTime: (!running && raceDistance >= finishDistance) ? raceTime : 0
+    }
+  ];
+  if (raceSync.other) {
+    const o = raceSync.other;
+    racers.push({
+      name: String(o.name || "对手").trim().slice(0, 10) || "对手",
+      mine: false,
+      distance: Math.max(0, Number(o.distance) || 0),
+      inRace: Boolean(o.inRace),
+      finished: Boolean(o.finished),
+      finishTime: Number(o.finishTime) || 0
+    });
+  }
+  racers.sort((a, b) => {
+    if (a.finished && b.finished) return (a.finishTime || 9999) - (b.finishTime || 9999);
+    if (a.finished !== b.finished) return a.finished ? -1 : 1;
+    return b.distance - a.distance;
+  });
+  const medals = ["🥇", "🥈"];
+  leaderboardList.innerHTML = racers.map((r, idx) => {
+    const rightText = r.finished && r.finishTime > 0
+      ? formatRaceTime(r.finishTime)
+      : (!r.inRace && raceSync.raceDriving ? `${Math.round(r.distance)}m · 准备区` : `${Math.round(r.distance)}m`);
+    const tag = r.mine ? "（我）" : "";
+    return `<li${r.mine ? ' class="mine"' : ""}><strong>${medals[idx] || `${idx + 1}.`} ${escapeHtml(r.name)}${tag}</strong><span>${rightText}</span></li>`;
+  }).join("");
+}
+
 function renderLeaderboard(scores) {
-  if (!scores.length) {
+  if (roomCode) {
+    renderRoomLiveRanking();
+    return;
+  }
+  const titleEl = document.querySelector("#leaderboardTitle");
+  if (titleEl) titleEl.textContent = "🏆 车王排行榜";
+  const validScores = (scores || []).filter(item => item && Number.isFinite(Number(item.time)) && Number(item.time) > 0);
+  if (!validScores.length) {
     leaderboardList.innerHTML = "<li>暂无纪录，等你来创奇迹！</li>";
     return;
   }
   // 自己的名字在榜上用黄色标出来，方便一眼找到
   const myName = (playerNameInput?.value.trim() || playerName || localStorage.getItem("neonRacerName") || "").toLowerCase();
-  leaderboardList.innerHTML = scores.map((item, index) => {
+  const medals = ["🥇", "🥈", "🥉"];
+  leaderboardList.innerHTML = validScores.map((item, index) => {
     const mine = myName && String(item.name || "").trim().toLowerCase() === myName;
-    return `<li${mine ? ' class="mine"' : ""}><strong>${index + 1}. ${escapeHtml(item.name)}</strong><span>${formatRaceTime(Number(item.time))}</span></li>`;
+    const prefix = medals[index] || `${index + 1}.`;
+    return `<li${mine ? ' class="mine"' : ""}><strong>${prefix} ${escapeHtml(item.name)}</strong><span>${formatRaceTime(Number(item.time))}</span></li>`;
   }).join("");
 }
 
