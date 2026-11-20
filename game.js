@@ -2364,6 +2364,28 @@ function forceEndRace() {
   setRoomBadge(roomCode, false, "比赛结束");
 }
 
+function exitCurrentGame() {
+  running = false;
+  sound.stopBGM();
+  releaseAllInputs();
+  baseSpeed = 0;
+  currentSpeed = 0;
+  boosting = false;
+  if (roomCode) {
+    leaveRaceRoom(false).catch(() => {});
+  }
+  const rivalEl = document.querySelector("#rivalMarker");
+  if (rivalEl) rivalEl.style.display = "none";
+  title.textContent = "公路漫游 3D";
+  message.textContent = "已退出当前对局，你可以重新选择赛道、距离或房间后再次出发。";
+  const startBtnEl = document.querySelector("#start");
+  if (startBtnEl) {
+    startBtnEl.disabled = false;
+    startBtnEl.textContent = "启动出发";
+  }
+  setMenuVisible(true);
+}
+
 async function endGame() {
   running = false;
   sound.stopBGM();
@@ -3120,6 +3142,13 @@ function onStartTap(e) {
 }
 startBtn.addEventListener("touchend", onStartTap);
 startBtn.addEventListener("click", onStartTap);
+
+const exitGameBtn = document.querySelector("#exitGameBtn");
+if (exitGameBtn) {
+  exitGameBtn.addEventListener("click", () => {
+    exitCurrentGame();
+  });
+}
 
 const testAudioBtn = document.querySelector("#testAudioBtn");
 if (testAudioBtn) {

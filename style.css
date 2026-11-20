@@ -128,6 +128,27 @@ canvas {
   transform: scale(0.92);
 }
 
+.exit-btn {
+  cursor: pointer;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 110, 130, 0.45);
+  border-radius: 18px;
+  background: rgba(60, 18, 30, 0.8);
+  color: #ffb3bf;
+  font: 700 12px 'Rajdhani', sans-serif;
+  letter-spacing: 0.04em;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transition: all 0.2s;
+}
+.exit-btn:hover {
+  border-color: rgba(255, 110, 130, 0.85);
+  box-shadow: 0 0 12px rgba(255, 110, 130, 0.35);
+}
+.exit-btn:active { transform: scale(0.94); }
+body.menu-open .exit-btn { display: none; }
+
 .quick-scene-select select {
   cursor: pointer;
   background: rgba(14, 20, 48, 0.85);

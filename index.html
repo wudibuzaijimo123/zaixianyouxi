@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=52">
+  <link rel="stylesheet" href="style.css?v=53">
 </head>
 <body>
   <!-- 3D WebGL Canvas 容器 -->
@@ -24,6 +24,7 @@
 
     <!-- 顶栏：倾斜转向 / 音效 / 快速切场景 / 服务器状态 -->
     <div class="topbar-actions">
+      <button id="exitGameBtn" class="exit-btn" title="退出当前对局返回菜单" type="button">退出</button>
       <button id="tiltToggle" class="icon-btn tilt-btn" title="开启手机倾斜转向" type="button">📱</button>
       <button id="audioToggle" class="icon-btn" title="开启音乐音效（默认静音）" type="button">🔇</button>
       <div class="quick-scene-select">
@@ -192,6 +193,6 @@
 
   <!-- 本地 Three.js 核心库 -->
   <script src="assets/three.min.js"></script>
-  <script src="game.js?v=75"></script>
+  <script src="game.js?v=76"></script>
 </body>
 </html>
