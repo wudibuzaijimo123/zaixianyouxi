@@ -176,6 +176,16 @@
           </label>
         </div>
 
+        <!-- 开局驾驶辅助选择 -->
+        <section class="menu-section auto-steering-selector" role="group" aria-label="自动转向选择">
+          <div class="theme-label">自动转向</div>
+          <div class="menu-steering-options">
+            <button class="steering-choice active" id="autoSteerOff" type="button" aria-pressed="true">关闭（手动）</button>
+            <button class="steering-choice" id="autoSteerOn" type="button" aria-pressed="false">开启（自动回正）</button>
+          </div>
+          <div class="steering-help" id="autoSteerHelp">手动驾驶：车辆方向由按键或手机倾斜控制。</div>
+        </section>
+
         <!-- 双人联机 -->
         <section class="menu-section room-controls" id="roomControls">
           <div class="theme-label">双人联机 <small>房主点「创建」，好友输同号点「进入」，两人都点「准备」即开局</small></div>
@@ -252,6 +262,6 @@
 
   <!-- 本地 Three.js 核心库 -->
   <script src="assets/three.min.js"></script>
-  <script src="game.js?v=113"></script>
+  <script src="game.js?v=114"></script>
 </body>
 </html>
