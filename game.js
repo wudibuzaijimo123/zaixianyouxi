@@ -24,6 +24,9 @@ const buttonMode = document.querySelector("#buttonMode");
 const tiltMode = document.querySelector("#tiltMode");
 const menuButtonMode = document.querySelector("#menuButtonMode");
 const menuTiltMode = document.querySelector("#menuTiltMode");
+const autoSteerOff = document.querySelector("#autoSteerOff");
+const autoSteerOn = document.querySelector("#autoSteerOn");
+const autoSteerHelp = document.querySelector("#autoSteerHelp");
 const steeringHelp = document.querySelector("#steeringHelp");
 const impactHud = document.querySelector("#impactHud");
 const impactValue = document.querySelector("#impactValue");
@@ -54,6 +57,8 @@ let tiltEnabled = false;
 let tiltSteer = 0;
 let tiltCenter = null;
 let steeringMode = "buttons";
+const AUTO_STEER_STORAGE = "racerAutoSteer";
+let autoSteeringEnabled = localStorage.getItem(AUTO_STEER_STORAGE) === "1";
 const keys = {};
 
 // ── 可自定义快捷键（默认：W 油门 / S 刹车 / Shift 加速 / ←→ 转向）──
@@ -4523,8 +4528,16 @@ function nearestLaneCenter(x) {
 }
 
 function applyLaneKeeping(x) {
-  // 取消车道自动吸附，允许车手完全自由控制横向位置、顺畅穿行两车缝隙
+  // 默认保持完全手动，不强制把车辆吸附到车道中心。
   return x;
+}
+
+function getAutoSteeringInput(x, heading) {
+  if (!autoSteeringEnabled || currentSpeed < LANE_KEEPING_MIN_SPEED) return 0;
+  const laneError = nearestLaneCenter(x) - x;
+  const correction = laneError * (LANE_KEEPING_STRENGTH * 0.035) - heading * 0.72;
+  const input = Math.max(-0.58, Math.min(0.58, correction));
+  return Math.abs(input) < 0.025 ? 0 : input;
 }
 
 function vehiclesOverlap(first, second) {
@@ -6206,6 +6219,9 @@ function update(dtScale = 1) {
   else if (turnRight) targetSteer = PHYS.maxSteerAngle;
   else if (steeringMode === "tilt" && Math.abs(tiltSteer) > 0.08) {
     targetSteer = tiltSteer * PHYS.maxSteerAngle;
+  } else if (autoSteeringEnabled) {
+    // 自动回正只保持当前车道，手动按键/倾斜输入优先，不会自动避让车流。
+    targetSteer = getAutoSteeringInput(carPhysics.x, carPhysics.heading) * PHYS.maxSteerAngle;
   }
 
   const steerSpeed = targetSteer === 0 ? PHYS.steerReturn : PHYS.steerSpeed;
@@ -6733,6 +6749,28 @@ tiltMode?.addEventListener("click", () => {
 menuTiltMode?.addEventListener("click", () => {
   if (!tiltEnabled) toggleTiltSteering();
 });
+
+function updateAutoSteeringUI() {
+  autoSteerOff?.classList.toggle("active", !autoSteeringEnabled);
+  autoSteerOn?.classList.toggle("active", autoSteeringEnabled);
+  autoSteerOff?.setAttribute("aria-pressed", String(!autoSteeringEnabled));
+  autoSteerOn?.setAttribute("aria-pressed", String(autoSteeringEnabled));
+  if (autoSteerHelp) {
+    autoSteerHelp.textContent = autoSteeringEnabled
+      ? "自动回正：松开方向后回到当前车道中心；按键或倾斜可随时覆盖，不会自动躲车。"
+      : "手动驾驶：车辆方向由按键或手机倾斜控制。";
+  }
+}
+
+function setAutoSteering(enabled) {
+  autoSteeringEnabled = Boolean(enabled);
+  localStorage.setItem(AUTO_STEER_STORAGE, autoSteeringEnabled ? "1" : "0");
+  updateAutoSteeringUI();
+}
+
+autoSteerOff?.addEventListener("click", () => setAutoSteering(false));
+autoSteerOn?.addEventListener("click", () => setAutoSteering(true));
+updateAutoSteeringUI();
 
 function bindButton(selector, key) {
   const element = document.querySelector(selector);
