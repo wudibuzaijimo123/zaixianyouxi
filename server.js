@@ -448,6 +448,15 @@ const server = http.createServer(async (request, response) => {
             player[key] = Number(body[key]);
           }
         }
+        if (typeof body.burnout === "boolean") {
+          player.burnout = body.burnout;
+        }
+        if (typeof body.braking === "boolean") {
+          player.braking = body.braking;
+        }
+        if (typeof body.carColor === "string" && /^#[0-9a-fA-F]{6}$/.test(body.carColor)) {
+          player.carColor = body.carColor;
+        }
       }
       if (body.inRace === true && !ignoreStaleDrivePacket) {
         player.inRace = true;
@@ -531,6 +540,15 @@ const server = http.createServer(async (request, response) => {
           if (body[key] !== undefined && Number.isFinite(Number(body[key]))) {
             player[key] = Number(body[key]);
           }
+        }
+        if (typeof body.burnout === "boolean") {
+          player.burnout = body.burnout;
+        }
+        if (typeof body.braking === "boolean") {
+          player.braking = body.braking;
+        }
+        if (typeof body.carColor === "string" && /^#[0-9a-fA-F]{6}$/.test(body.carColor)) {
+          player.carColor = body.carColor;
         }
         player.inRace = false;
         player.ready = false;
