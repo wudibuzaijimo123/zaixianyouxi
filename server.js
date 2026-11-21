@@ -152,6 +152,14 @@ function buildRoomSyncPayload(room, viewerId) {
   };
 }
 
+function broadcastRoom(room, excludeViewerId = "") {
+  if (!room || !room.streams || room.streams.size === 0) return;
+  for (const sub of room.streams) {
+    if (excludeViewerId && sub.viewerId === excludeViewerId) continue;
+    sub.push();
+  }
+}
+
 function saveLeftSeat(room, player) {
   if (!room || !player || !room.startAt || Date.now() < room.startAt || room.finishAt) return;
   if (!room.leftSeats) room.leftSeats = new Map();
@@ -187,6 +195,9 @@ ensureDataFile();
 
 const server = http.createServer(async (request, response) => {
   try {
+    if (request.socket && typeof request.socket.setNoDelay === "function") {
+      request.socket.setNoDelay(true);
+    }
     // 允许 GitHub Pages 与自建站点跨域调用：回显 Origin，没有 Origin 时用 *
     response.setHeader("Access-Control-Allow-Origin", request.headers.origin || "*");
     response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -232,9 +243,18 @@ const server = http.createServer(async (request, response) => {
       let roomCode = String(body.roomCode || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
       const action = String(body.action || "join");
 
-      // 手动房号：两人输同一个号就能进，先到的人负责建房间
+      const resumeId = String(body.resumePlayerId || "");
+      // 手动房号：两人输同一个号就能进，先到的人负责建房间；已有活跃房间时禁止他人重复创建同房号
       if (action === "create" && !roomCode) {
-        roomCode = Math.random().toString(36).slice(2, 6).toUpperCase();
+        for (let tries = 0; tries < 12; tries++) {
+          const cand = Math.random().toString(36).slice(2, 6).toUpperCase();
+          const ex = raceRooms.get(cand);
+          if (!ex || activePlayers(ex).length === 0) {
+            roomCode = cand;
+            break;
+          }
+        }
+        if (!roomCode) roomCode = Math.random().toString(36).slice(2, 6).toUpperCase();
       }
       if (action === "join" && roomCode.length < 3) {
         return sendJson(response, 400, { error: "房间号至少 3 位，两人输一样的号就能进同一个房间。" });
@@ -247,16 +267,37 @@ const server = http.createServer(async (request, response) => {
         const difficulty = validDiffs.has(body.difficulty) ? body.difficulty : "normal";
         const existing = raceRooms.get(roomCode);
         if (!existing) {
-          raceRooms.set(roomCode, { players: new Map(), leftSeats: new Map(), hostId: "", updatedAt: Date.now(), startAt: 0, finishAt: 0, forceLobbyAt: 0, finishDistance, theme, difficulty, configVersion: 1 });
-        } else if (!isRaceDriving(existing) || activePlayers(existing).length === 0) {
-          // 只要房间未在行驶或场内已无人，点「创建」清掉残局；若仍有队友在跑则保留赛局以便断点续跑
+          raceRooms.set(roomCode, { players: new Map(), leftSeats: new Map(), streams: new Set(), hostId: "", updatedAt: Date.now(), startAt: 0, finishAt: 0, forceLobbyAt: 0, finishDistance, theme, difficulty, configVersion: 1 });
+        } else {
+          // 先清理超时离线幽灵占位
           for (const [id, p] of existing.players) {
-            if (Date.now() - p.updatedAt >= ACTIVE_MS) existing.players.delete(id);
+            if (isRaceDriving(existing)) {
+              if (Date.now() - p.updatedAt > TIMEOUT_MS) {
+                saveLeftSeat(existing, p);
+                existing.players.delete(id);
+              }
+            } else if (Date.now() - p.updatedAt >= ACTIVE_MS) {
+              if (existing.hostId === id) existing.hostId = "";
+              existing.players.delete(id);
+            }
           }
-          if (existing.finishAt > 0 || isRaceDriving(existing) || !isPlayerActive(existing, existing.hostId)) {
+          const alive = activePlayers(existing);
+          const isSameHostReconnect = Boolean(
+            resumeId && (existing.hostId === resumeId || existing.leftSeats?.get(resumeId)?.isHost)
+          );
+          if (alive.length > 0 && !isSameHostReconnect) {
+            return sendJson(response, 409, {
+              error: `房间 ${roomCode} 已被创建，请直接点「进入」加入，或换一个不同的房间号创建。`,
+              code: "ROOM_ALREADY_EXISTS"
+            });
+          }
+          if (alive.length === 0) {
             resetRoomToLobby(existing);
             existing.forceLobbyAt = Date.now();
             existing.hostId = "";
+            existing.finishDistance = finishDistance;
+            existing.theme = theme;
+            existing.difficulty = difficulty;
           }
         }
       }
@@ -288,7 +329,6 @@ const server = http.createServer(async (request, response) => {
       }
 
       // 支持误退出 / 刷新页面后按原 playerId 或同昵称重连回到当前对局
-      const resumeId = String(body.resumePlayerId || "");
       let resumedSeat = (resumeId && room.players.get(resumeId)) || null;
       if (!resumedSeat && (!isRaceDriving(room) || room.players.size >= 2)) {
         resumedSeat = [...room.players.values()].find(p => String(p.name || "").trim().toLowerCase() === name.trim().toLowerCase()) || null;
@@ -377,6 +417,7 @@ const server = http.createServer(async (request, response) => {
         room.startAt = 0;
       }
       const sync = buildRoomSyncPayload(room, playerId);
+      broadcastRoom(room, playerId);
 
       return sendJson(response, 200, {
         ...sync,
@@ -449,6 +490,7 @@ const server = http.createServer(async (request, response) => {
           .join(" | ");
         console.log(`[room ${String(body.roomCode || "").toUpperCase()}] players=${room.players.size} startAt=${room.startAt} ${roster}`);
       }
+      broadcastRoom(room, body.playerId);
       return sendJson(response, 200, buildRoomSyncPayload(room, body.playerId));
     }
 
@@ -468,10 +510,12 @@ const server = http.createServer(async (request, response) => {
           player.inRace = true;
           player.resumeStartAt = 0;
           player.exitedLobbyAt = 0;
+          broadcastRoom(room, player.id);
           return sendJson(response, 200, { ...buildRoomSyncPayload(room, player.id), instantResume: true });
         }
         player.resumeStartAt = 0;
       }
+      broadcastRoom(room, player.id);
       return sendJson(response, 200, buildRoomSyncPayload(room, player.id));
     }
 
@@ -495,12 +539,14 @@ const server = http.createServer(async (request, response) => {
         const anyoneStillRacing = [...room.players.values()].some(p => p.id !== player.id && p.inRace && isPlayerActive(room, p.id));
         if (anyoneStillRacing) {
           saveLeftSeat(room, player);
+          broadcastRoom(room, player.id);
           return sendJson(response, 200, { ...buildRoomSyncPayload(room, player.id), waitingOtherFinish: false, soloExitToLobby: true });
         }
         resetRoomToLobby(room);
         room.forceLobbyAt = Date.now();
         if (!room.hostId || !isPlayerActive(room, room.hostId)) room.hostId = player.id;
         room.configVersion = (room.configVersion || 1) + 1;
+        broadcastRoom(room, player.id);
         return sendJson(response, 200, { ...buildRoomSyncPayload(room, player.id), waitingOtherFinish: false, soloExitToLobby: false });
       }
       const forceLobby = Boolean(body.forceLobby);
@@ -520,6 +566,7 @@ const server = http.createServer(async (request, response) => {
       } else {
         resetPlayerForLobby(player);
       }
+      broadcastRoom(room, player.id);
       return sendJson(response, 200, { ...buildRoomSyncPayload(room, player.id), waitingOtherFinish: false });
     }
 
@@ -550,17 +597,19 @@ const server = http.createServer(async (request, response) => {
           }
           room.players.delete(pid);
           room.updatedAt = Date.now();
+          broadcastRoom(room, pid);
         }
       }
       return sendJson(response, 200, { ok: true });
     }
 
-    // 实时推送：SSE，服务端每 40ms 推一次房间内两人的状态，免去客户端轮询延迟
+    // 实时推送：事件驱动零延迟推送（任意状态变更/坐标上报瞬间广播），外加 220ms 轻心跳维持倒计时与保活
     if (url.pathname === "/api/race/stream" && request.method === "GET") {
       const code = String(url.searchParams.get("roomCode") || "").toUpperCase();
       const viewerId = url.searchParams.get("playerId") || "";
       const room = raceRooms.get(code);
       if (!room) return sendJson(response, 404, { error: "房间不存在" });
+      if (!room.streams) room.streams = new Set();
 
       response.writeHead(200, {
         "Content-Type": "text/event-stream; charset=utf-8",
@@ -569,6 +618,7 @@ const server = http.createServer(async (request, response) => {
         "X-Accel-Buffering": "no",
         "Access-Control-Allow-Origin": request.headers.origin || "*"
       });
+      if (typeof response.flushHeaders === "function") response.flushHeaders();
 
       const push = () => {
         const data = buildRoomSyncPayload(room, viewerId);
@@ -578,10 +628,13 @@ const server = http.createServer(async (request, response) => {
           /* 连接已断开 */
         }
       };
+      const sub = { viewerId, push };
+      room.streams.add(sub);
       push();
-      const timer = setInterval(push, 40);
+      const timer = setInterval(push, 220);
       const stop = () => {
         clearInterval(timer);
+        room.streams.delete(sub);
         try { response.end(); } catch (error) { /* ignore */ }
       };
       request.on("close", stop);
@@ -600,6 +653,8 @@ const server = http.createServer(async (request, response) => {
   }
 });
 
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
 server.listen(port, () => {
   console.log(`Neon Racer server running at http://localhost:${port}`);
 });

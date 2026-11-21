@@ -138,8 +138,13 @@ let currentTheme = localStorage.getItem("racerSceneTheme") || "country";
 // 前端既可能在阿里云服务器上（与 /api 同源），也可能托管在 GitHub Pages 上（需跨域打 API 域名）。
 // 先试同源，失败自动回退到独立 API 域名，两边部署都不用改代码。
 const API_FALLBACK = "https://api.game.yhj123.dpdns.org";
-let apiBase = (window.location.protocol.startsWith("http") && !window.location.hostname.endsWith("github.io")) ? "" : null;
+const IS_SAME_ORIGIN_API = window.location.protocol.startsWith("http") && !window.location.hostname.endsWith("github.io");
+let apiBase = IS_SAME_ORIGIN_API ? "" : API_FALLBACK;
 let resolveApiPromise = null;
+// 跨站访问（如 GitHub Pages / 本地直接打开）时启动即静默预热 TLS 长连接，点进房时零握手延迟
+if (!IS_SAME_ORIGIN_API && typeof fetch === "function") {
+  fetch(`${API_FALLBACK}/api/health`, { cache: "no-store", mode: "cors" }).catch(() => {});
+}
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
   if (typeof AbortController === "undefined") {
@@ -261,9 +266,13 @@ async function enterRaceRoomSerial(rawCode, mode = "join") {
   }
   const savedRoom = loadActiveRoom();
   const resumePlayerId = savedRoom && savedRoom.roomCode === code ? savedRoom.playerId : "";
-  // 手里还握着旧座位就先释放，保证"退出后再进来"永远能成功
+  // 手里还握着旧座位就先释放：切去新房号时后台异步释放不阻塞进房，重进同房号则先释放再进
   if (roomCode && roomPlayerId) {
-    await leaveRaceRoom(true);
+    if (roomCode === code) {
+      await leaveRaceRoom(true);
+    } else {
+      leaveRaceRoom(true).catch(() => {});
+    }
   }
   let result = null;
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -351,7 +360,14 @@ async function enterRaceRoomSerial(rawCode, mode = "join") {
   updateStartButtonForRoom();
   updateRoomLobbyStatus();
   if (roomPollTimer) clearInterval(roomPollTimer);
-  roomPollTimer = setInterval(syncRaceRoom, 60);
+  lastRoomPollAt = 0;
+  roomPollTimer = setInterval(() => {
+    const minInterval = running ? 45 : 240;
+    const now = performance.now();
+    if (now - lastRoomPollAt < minInterval) return;
+    lastRoomPollAt = now;
+    syncRaceRoom();
+  }, 45);
   startRaceStream();
   applyRaceStart(result);
 }
@@ -361,27 +377,23 @@ async function connectRaceRoom(action, code = "") {
   await enterRaceRoom(code);
 }
 
-// 退出房间：释放服务器座位、断开推送、可选保留重连凭证
+// 退出房间：先立刻释放本地连接和状态，再通知服务器释放座位，切房不阻塞
 async function leaveRaceRoom(silent = false, keepResume = false) {
   const code = roomCode;
   const id = roomPlayerId;
   setRacePaused(false);
   const snap = !running && raceSync.resumeState ? raceSync.resumeState : null;
-  if (code && id) {
-    try {
-      await api.post("/api/race/leave", {
-        roomCode: code,
-        playerId: id,
-        x: snap ? snap.x : carPhysics.x,
-        heading: snap ? (snap.heading || 0) : carPhysics.heading,
-        speed: snap ? (snap.speed || 0) : currentSpeed,
-        distance: snap ? (snap.distance || 0) : raceDistance,
-        time: snap ? (snap.time || 0) : raceTime,
-        score: Math.floor(snap ? (snap.score || 0) : score),
-        nitro: snap ? (snap.nitro ?? 100) : nitro
-      });
-    } catch (error) { /* 忽略 */ }
-  }
+  const leaveBody = code && id ? {
+    roomCode: code,
+    playerId: id,
+    x: snap ? snap.x : carPhysics.x,
+    heading: snap ? (snap.heading || 0) : carPhysics.heading,
+    speed: snap ? (snap.speed || 0) : currentSpeed,
+    distance: snap ? (snap.distance || 0) : raceDistance,
+    time: snap ? (snap.time || 0) : raceTime,
+    score: Math.floor(snap ? (snap.score || 0) : score),
+    nitro: snap ? (snap.nitro ?? 100) : nitro
+  } : null;
   if (raceStream) {
     try { raceStream.close(); } catch (error) { /* ignore */ }
     raceStream = null;
@@ -411,6 +423,7 @@ async function leaveRaceRoom(silent = false, keepResume = false) {
   raceSync.configChangedNotice = false;
   raceSync.lastForceLobbyAt = 0;
   raceSync.lastSyncSeq = 0;
+  raceSync.rttMs = 0;
   raceSync.pendingPaused = false;
   raceSync.pendingPausedReason = "";
   if (raceSync.countdownTimer) {
@@ -455,6 +468,11 @@ async function leaveRaceRoom(silent = false, keepResume = false) {
     }
     running = false;
   }
+  if (leaveBody) {
+    try {
+      await api.post("/api/race/leave", leaveBody);
+    } catch (error) { /* 忽略 */ }
+  }
 }
 
 // ── 联机同步开局：房主确认配置，双方点“准备”后分占左右不同车道统一倒计时出发 ──
@@ -483,6 +501,7 @@ const raceSync = {
   lastConfigEditAt: 0,
   lastForceLobbyAt: 0,
   lastSyncSeq: 0,
+  rttMs: 0,
   exitGuardUntil: 0
 };
 
@@ -1106,10 +1125,12 @@ function launchMultiRace(showGo = false) {
 
 let syncFailCount = 0;
 let sseRetryTimer = null;
+let lastRoomPollAt = 0;
 let syncInFlight = false;
 async function syncRaceRoom() {
   if (!roomCode || !roomPlayerId || syncInFlight) return;
   syncInFlight = true;
+  const reqStartedAt = performance.now();
   try {
     const snap = !running && raceSync.resumeState ? raceSync.resumeState : null;
     const posted = await api.post("/api/race/state", {
@@ -1127,6 +1148,8 @@ async function syncRaceRoom() {
       theme: raceSync.isHost ? currentTheme : undefined,
       difficulty: raceSync.isHost ? currentDifficulty : undefined
     });
+    const sampleRtt = Math.max(10, Math.min(800, performance.now() - reqStartedAt));
+    raceSync.rttMs = raceSync.rttMs ? (raceSync.rttMs * 0.72 + sampleRtt * 0.28) : sampleRtt;
     applyRaceStart(posted);
     raceSync.finishRemainSec = Number(posted.finishRemainSec) || 0;
     raceSync.raceOver = Boolean(posted.raceOver);
@@ -1338,18 +1361,21 @@ function updateRivalMarker(rel, rivalOnRoad = true) {
   el.style.bottom = ahead ? "auto" : "18%";
 }
 
-// 每一帧：用对手上报的里程 + 速度外推，画出真实的相对运动（不与真人发生碰撞）
+// 每一帧：用对手上报的里程 + 速度 + 半 RTT 延迟补偿外推，画出高实时性的相对运动（不与真人发生碰撞）
 function syncRemoteCarVisual() {
   const o = raceSync.other;
   if (!o || !remoteCar) return;
-  const elapsed = raceSync.paused ? 0 : Math.max(0, Math.min(0.4, (Date.now() - o.at) / 1000));
+  const halfRttSec = running ? Math.min(0.22, (raceSync.rttMs || 50) / 2000) : 0;
+  const elapsed = raceSync.paused ? 0 : Math.max(0, Math.min(0.45, (Date.now() - o.at) / 1000 + halfRttSec));
   // 上报速度单位换算成实际前进：speed * 90 / 3.6 米每秒
   const projected = o.distance + (o.speed * 90 / 3.6) * elapsed;
   const rel = projected - raceDistance;             // 真实差距：正数=对手领先，负数=己方领先
   const pt = trackWorldPoint(projected, o.x, 0);
-  remoteCar.group.position.z += (pt.z - remoteCar.group.position.z) * 0.58;
-  remoteCar.group.position.x += (pt.x - remoteCar.group.position.x) * 0.58;
-  remoteCar.group.position.y += (pt.y - remoteCar.group.position.y) * 0.58;
+  const jumpDist = Math.hypot(pt.x - remoteCar.group.position.x, pt.z - remoteCar.group.position.z);
+  const smooth = jumpDist > 28 ? 1.0 : 0.62;
+  remoteCar.group.position.z += (pt.z - remoteCar.group.position.z) * smooth;
+  remoteCar.group.position.x += (pt.x - remoteCar.group.position.x) * smooth;
+  remoteCar.group.position.y += (pt.y - remoteCar.group.position.y) * smooth;
   remoteCar.group.rotation.y = -o.heading + pt.yaw;
   remoteCar.group.rotation.z = pt.bankAngle;
   remoteCar.wheels.forEach(w => {
