@@ -1,4 +1,4 @@
-1# 在线版 · PlayCarGame（3D 赛车公路竞速 · 双人联机）
+# 在线版 · PlayCarGame（3D 赛车公路竞速 · 双人联机）
 
 线上体验：<https://api.game.yhj123.dpdns.org/>  
 GitHub（在线联机版）：<https://github.com/wudibuzaijimo123/zaixianyouxi>
