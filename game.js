@@ -575,18 +575,20 @@ function renderRoomSlots() {
   const hasOther = Number(raceSync.playerCount) >= 2 && Boolean(raceSync.other);
   const otherName = escapeHtml(raceSync.other?.name || raceSync.remoteName || "好友");
   const myResumeDist = raceSync.resumeState && Number(raceSync.resumeState.distance) > 0 ? Math.round(Number(raceSync.resumeState.distance)) : 0;
+  const myReadyState = Boolean(raceSync.myReady || raceSync.armed);
+  const otherReadyState = Boolean(raceSync.otherReady || raceSync.otherInRace || raceSync.armed);
   const myCard = {
     role: raceSync.isHost ? "👑 房主（左道）" : "车手（右道）",
     name: `${myName}（我）`,
-    ready: Boolean(raceSync.myReady),
+    ready: myReadyState,
     empty: false,
     lane: raceSync.myLane,
-    customBadge: !raceSync.myReady && myResumeDist > 0 ? `已退 · 原位置 ${myResumeDist}m` : ""
+    customBadge: !myReadyState && myResumeDist > 0 ? `已退 · 原位置 ${myResumeDist}m` : ""
   };
   const otherCard = {
     role: raceSync.isHost ? "好友（右道）" : "👑 房主（左道）",
     name: hasOther ? otherName : "等待好友输入房号…",
-    ready: Boolean(raceSync.otherReady || raceSync.otherInRace),
+    ready: otherReadyState,
     empty: !hasOther,
     lane: -raceSync.myLane,
     customBadge: hasOther && raceSync.otherInRace ? "✓ 已准备（比赛中）" : ""
@@ -604,8 +606,9 @@ function renderRoomSlots() {
 }
 
 function updateRoomLobbyStatus(overrideText = "") {
-  if (!roomCode || running || raceSync.armed) return;
+  if (!roomCode || running) return;
   renderRoomSlots();
+  if (raceSync.armed) return;
   const status = document.querySelector("#roomStatus");
   if (!status) return;
   if (overrideText) {
@@ -969,7 +972,10 @@ function applyRaceStart(payload) {
   raceSync.startAt = localStart;
   raceSync.armed = true;
   raceSync.launched = false;
+  raceSync.myReady = true;
+  raceSync.otherReady = true;
   syncHostControlsLock();
+  renderRoomSlots();
   updateStartButtonForRoom();
   startMultiRaceCountdown();
 }
@@ -3280,11 +3286,9 @@ function nearestLaneCenter(x) {
   return -ROAD_WIDTH / 2 + (laneIndex + 0.5) * LANE_WIDTH;
 }
 
-function applyLaneKeeping(x, steering, speed, dt) {
-  if (Math.abs(steering) > 0.01 || speed < LANE_KEEPING_MIN_SPEED) return x;
-  const target = nearestLaneCenter(x);
-  const blend = 1 - Math.exp(-LANE_KEEPING_STRENGTH * dt);
-  return x + (target - x) * blend;
+function applyLaneKeeping(x) {
+  // 取消车道自动吸附，允许车手完全自由控制横向位置、顺畅穿行两车缝隙
+  return x;
 }
 
 function vehiclesOverlap(first, second) {
